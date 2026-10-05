@@ -45,6 +45,7 @@
   <string name="library_convert_iso">ISO  ›  XISO</string>
   <string name="library_view_list">List</string>
   <string name="library_view_cover_grid">Covers</string>
+  <string name="library_view_carousel">Carousel</string>
   <string name="library_box_art_lookup">Look up box art online</string>
   <string name="library_long_press_hint">Press and hold on game for options.</string>
   <string name="library_no_folder">No folder selected</string>
