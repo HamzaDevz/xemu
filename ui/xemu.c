@@ -65,6 +65,7 @@
 
 #ifdef __ANDROID__
 #include <android/log.h>
+#include <sys/system_properties.h>
 #include <SDL3/SDL_vulkan.h>
 #endif
 #ifdef _WIN32
@@ -164,6 +165,45 @@ static bool g_android_direct_vulkan = false;
 bool xemu_android_vulkan_direct_present_enabled(void)
 {
     return g_android_direct_vulkan;
+}
+
+/*
+ * Each direct-Vulkan present stops the pfifo thread until the render thread
+ * has acquired, drawn and presented, so presenting at the panel's refresh
+ * rate while a game draws 30 fps mostly stalls emulation to re-show a frame
+ * already on screen. Present only when the guest display changed, or at
+ * least every 33 ms for anything that bypasses the generation (and to
+ * redraw after a swapchain rebuild). `setprop debug.xemu.vk.present_gate 0`
+ * presents every pass, as before.
+ */
+static bool android_vk_present_needed(void)
+{
+    static int enabled = -1;
+    static uint64_t shown_generation;
+    static int64_t shown_at;
+
+    if (enabled < 0) {
+        char value[PROP_VALUE_MAX] = {};
+        enabled = !(__system_property_get("debug.xemu.vk.present_gate",
+                                          value) > 0 &&
+                    value[0] == '0');
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "vulkan present gate: %s",
+                            enabled ? "on" : "off");
+    }
+    if (!enabled) {
+        return true;
+    }
+
+    uint64_t generation = nv2a_get_display_generation();
+    int64_t now = g_get_monotonic_time();
+    if (shown_at && generation == shown_generation &&
+        now - shown_at < 33000) {
+        return false;
+    }
+    shown_generation = generation;
+    shown_at = now;
+    return true;
 }
 
 bool xemu_android_vulkan_create_surface(VkInstance instance,
@@ -1575,8 +1615,10 @@ void xemu_android_display_loop(void)
              * surface while servicing this framebuffer request. Android's
              * controller overlay is a separate View above the SDL surface.
              */
-            (void)nv2a_get_framebuffer_surface();
-            nv2a_release_framebuffer_surface();
+            if (android_vk_present_needed()) {
+                (void)nv2a_get_framebuffer_surface();
+                nv2a_release_framebuffer_surface();
+            }
             qemu_mutex_lock_main_loop();
             bql_lock();
             sdl2_poll_events(&sdl2_console[0]);

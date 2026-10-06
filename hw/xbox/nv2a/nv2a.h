@@ -46,5 +46,6 @@ void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
+uint64_t nv2a_get_display_generation(void);
 
 #endif
