@@ -31,6 +31,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.LinearSnapHelper
 import androidx.recyclerview.widget.RecyclerView
+import coil.dispose
 import coil.load
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -103,6 +104,9 @@ class GameLibraryActivity : AppCompatActivity() {
     val relativePath: String,
     val sizeBytes: Long,
     val discImageFormat: DiscImageFormat,
+    /* From the image's default.xbe: the certificate's name and the title image. */
+    val xbeTitle: String? = null,
+    val xbeIcon: File? = null,
   )
 
   private data class CoverEntry(
@@ -131,6 +135,12 @@ class GameLibraryActivity : AppCompatActivity() {
   private val coverIndex = ConcurrentHashMap<String, String>()
   private val coverCollapsedIndex = ConcurrentHashMap<String, String>()
   /*
+   * A cover's collapsed title by its main title, the part before " - " or
+   * ":": "halo" to "halocombatevolved". An XBE certificate often carries only
+   * that. A main title more than one game shares maps to "".
+   */
+  private val coverMainTitleIndex = HashMap<String, String>()
+  /*
    * Bridges what a Chihiro image calls itself to the cover named after the
    * release: boot.id says "CrazyTaxi HighRoller" and "OutRun2", the covers
    * are "Crazy Taxi 3 High Roller" and "Outrun 2". Also catches a dump
@@ -158,6 +168,7 @@ class GameLibraryActivity : AppCompatActivity() {
   private val chihiroCoverIndex = ConcurrentHashMap<String, String>()
   /* Titles read out of Chihiro images, keyed by uri + size. */
   private val chihiroTitleCache = ConcurrentHashMap<String, String>()
+  private val xbeMetadataCache by lazy { XbeMetadataCache(this) }
   private val coverEntries = ArrayList<CoverEntry>()
   private val coverIndexLock = Any()
   private val discFormatCacheLock = Any()
@@ -1054,50 +1065,76 @@ class GameLibraryActivity : AppCompatActivity() {
     game: GameEntry,
     model: Any? = resolveCoverModel(game),
   ) {
-    coverView.tag = game.uri.toString()
+    /*
+     * The carousel recycles views: a load still running for the game this
+     * view showed before would land on this one. Only a new load cancels it,
+     * so a game with no cover has to.
+     */
+    coverView.dispose()
+    val tag = game.uri.toString()
+    coverView.tag = tag
     showCoverPlaceholder(coverView)
     if (model != null) {
-      loadCoverArtIntoView(coverView, model)
+      loadCoverArtIntoView(coverView, model, tag)
     }
   }
 
-  /* A custom or persisted cover file, a box-art URL, or null for the placeholder. */
+  /*
+   * A custom or persisted cover file, a box-art URL, the title image from the
+   * game's own executable, or null for the placeholder. Box art is matched by
+   * the file's name, then by the name in the executable's certificate.
+   */
   private fun resolveCoverModel(game: GameEntry): Any? {
     val customFile = getCustomCoverFile(game)
     if (customFile.exists()) {
       return customFile
     }
 
-    val key = normalizeCoverKey(game.title)
+    /*
+     * An arcade release and its Xbox port share a name (OutRun 2, Crazy
+     * Taxi 3) but not art, so a Chihiro entry's cover is cached apart.
+     */
+    val chihiro = isChihiroEntry(game)
+    val key = (if (chihiro) "chihiro " else "") + normalizeCoverKey(game.title)
     val persistedFile = getPersistedCoverFile(key)
     if (persistedFile.exists() && persistedFile.length() > 0L) {
       return persistedFile
     }
 
-    if (!boxArtLookupEnabled) {
-      return null
+    if (boxArtLookupEnabled) {
+      val chihiroUrl = if (chihiro) lookupChihiroCoverUrl(game.title) else null
+      /*
+       * Never a fuzzy guess at Xbox art for an arcade game: "Mahjong Fight
+       * Club" scores as Fight Club. The aliases cover the real near-misses.
+       */
+      val url = boxArtCache[key]
+        ?: chihiroUrl
+        ?: lookupBoxArtUrl(game.title, game.xbeTitle, fuzzy = !chihiro)
+      if (url != null) {
+        boxArtCache[key] = url
+        persistDownloadedCoverAsync(key, url)
+        return url
+      }
     }
 
-    val chihiroUrl = if (isChihiroEntry(game)) lookupChihiroCoverUrl(game.title) else null
-    val url = boxArtCache[key] ?: chihiroUrl ?: lookupBoxArtUrl(game.title) ?: return null
-    boxArtCache[key] = url
-    persistDownloadedCoverAsync(key, url)
-    return url
+    return game.xbeIcon?.takeIf { it.isFile }
   }
 
-  private fun loadCoverArtIntoView(coverView: ImageView, model: Any) {
+  private fun loadCoverArtIntoView(coverView: ImageView, model: Any, tag: String) {
     coverView.load(model) {
       crossfade(true)
       placeholder(R.drawable.ic_xemu_image_placeholder)
       error(R.drawable.ic_xemu_image_placeholder)
       listener(
         onSuccess = { _, _ ->
-          if (coverView.tag != null) {
+          if (coverView.tag == tag) {
             coverView.background = null
           }
         },
         onError = { _, _ ->
-          showCoverPlaceholder(coverView)
+          if (coverView.tag == tag) {
+            showCoverPlaceholder(coverView)
+          }
         }
       )
     }
@@ -1194,7 +1231,11 @@ class GameLibraryActivity : AppCompatActivity() {
     return chihiroCoverIndex[collapsed]
   }
 
-  private fun lookupBoxArtUrl(title: String): String? {
+  private fun lookupBoxArtUrl(
+    title: String,
+    certificateTitle: String? = null,
+    fuzzy: Boolean = true,
+  ): String? {
     ensureCoverIndexLoaded()
     val candidates = linkedSetOf<String>()
     val cleanTitle = normalizeLookupTitle(title)
@@ -1230,7 +1271,10 @@ class GameLibraryActivity : AppCompatActivity() {
       }
     }
 
-    val fuzzyMatch = findClosestCoverUrl(candidates)
+    /* The executable's own name before a fuzzy guess at the file's. */
+    certificateTitle?.let(::lookupCertificateCoverUrl)?.let { return it }
+
+    val fuzzyMatch = if (fuzzy) findClosestCoverUrl(candidates) else null
     if (!fuzzyMatch.isNullOrBlank()) {
       for (key in candidates) {
         coverIndex.putIfAbsent(key, fuzzyMatch)
@@ -1242,7 +1286,10 @@ class GameLibraryActivity : AppCompatActivity() {
       return fuzzyMatch
     }
 
-    boxArtMisses.add(normalizedTitle)
+    /* A miss without the fuzzy pass says nothing about a lookup with it. */
+    if (fuzzy) {
+      boxArtMisses.add(normalizedTitle)
+    }
     return null
   }
 
@@ -1290,6 +1337,12 @@ class GameLibraryActivity : AppCompatActivity() {
           val collapsed = collapseCoverKey(canonical)
           if (collapsed.isNotEmpty()) {
             coverCollapsedIndex.putIfAbsent(collapsed, url)
+          }
+          val mainTitle = collapseCoverKey(canonical.substringBefore(" - ").substringBefore(":"))
+          if (mainTitle.isNotEmpty() && mainTitle != collapsed) {
+            val existing = coverMainTitleIndex[mainTitle]
+            coverMainTitleIndex[mainTitle] =
+              if (existing == null || existing == collapsed) collapsed else ""
           }
           if (canonical.isNotEmpty() && seenEntries.add("$canonical|$url")) {
             val tokens = tokenizeCoverKey(canonical)
@@ -1349,6 +1402,32 @@ class GameLibraryActivity : AppCompatActivity() {
 
   private fun collapseCoverKey(input: String): String {
     return normalizeCoverKey(input).replace(Regex("[^a-z0-9]+"), "")
+  }
+
+  /*
+   * A cover for the name in a game's XBE certificate. Exact matches only: the
+   * certificate names the game outright, and a short name like "Halo" would
+   * fuzzy-match a sequel's cover.
+   */
+  private fun lookupCertificateCoverUrl(certificateTitle: String): String? {
+    val candidates = linkedSetOf<String>()
+    addCoverLookupCandidates(candidates, certificateTitle)
+    addCoverLookupCandidates(candidates, certificateTitle.replace(":", ""))
+    for (key in candidates) {
+      coverIndex[key]?.let { return it }
+    }
+    for (key in candidates) {
+      val collapsed = collapseCoverKey(key)
+      if (collapsed.isBlank()) {
+        continue
+      }
+      coverCollapsedIndex[collapsed]?.let { return it }
+      coverMainTitleIndex[collapsed]
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { coverCollapsedIndex[it] }
+        ?.let { return it }
+    }
+    return null
   }
 
   private fun tokenizeCoverKey(input: String): Set<String> {
@@ -1863,6 +1942,7 @@ class GameLibraryActivity : AppCompatActivity() {
 
     val games = ArrayList<GameEntry>()
     val seenDiscFormatKeys = HashSet<String>()
+    val seenXbeKeys = HashSet<String>()
     while (stack.isNotEmpty()) {
       val (node, prefix) = stack.removeLast()
       val files = try {
@@ -1880,13 +1960,23 @@ class GameLibraryActivity : AppCompatActivity() {
           continue
         }
         val sizeBytes = child.length()
+        val discImageFormat = resolveDiscImageFormat(child.uri, name, sizeBytes, seenDiscFormatKeys)
+        val xbe = if (discImageFormat == DiscImageFormat.XISO ||
+          discImageFormat == DiscImageFormat.REGULAR_ISO
+        ) {
+          xbeMetadataCache.get(child.uri, sizeBytes, seenXbeKeys)
+        } else {
+          null
+        }
         games.add(
           GameEntry(
             title = chihiroImageTitle(child.uri, name, sizeBytes) ?: toGameTitle(name),
             uri = child.uri,
             relativePath = prefix + name,
             sizeBytes = sizeBytes,
-            discImageFormat = resolveDiscImageFormat(child.uri, name, sizeBytes, seenDiscFormatKeys),
+            discImageFormat = discImageFormat,
+            xbeTitle = xbe?.titleName?.ifBlank { null },
+            xbeIcon = xbe?.icon,
           )
         )
       }
@@ -1894,6 +1984,7 @@ class GameLibraryActivity : AppCompatActivity() {
 
     games.sortBy { it.title.lowercase(Locale.ROOT) }
     persistDiscFormatCache(seenDiscFormatKeys)
+    xbeMetadataCache.persist(seenXbeKeys)
     return games
   }
 
