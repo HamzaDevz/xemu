@@ -764,16 +764,39 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
         return fence;
     }
 
+    /*
+     * Interrupt and flip control registers are single words that need no
+     * renderer state. pg->lock is held by the FIFO puller for whole method
+     * batches, including foreground shader and pipeline compiles, and a
+     * guest read here holds the BQL while it waits: a 13-38 ms stall of the
+     * whole VM was traced to INTR and INCREMENT reads (Mainkill1/xemu
+     * 2b21ca0126, 72c8deb2c7). A momentarily stale value is what the CPU
+     * reading an asynchronously updated register gets on hardware.
+     */
+    uint32_t control;
+    switch (addr) {
+    case NV_PGRAPH_INTR:
+        control = qatomic_read(&pg->pending_interrupts);
+        break;
+    case NV_PGRAPH_INTR_EN:
+        control = qatomic_read(&pg->enabled_interrupts);
+        break;
+    case NV_PGRAPH_INCREMENT:
+    case NV_PGRAPH_SURFACE:
+    case NV_PGRAPH_FIFO:
+        control = qatomic_read(&pg->regs_[addr]);
+        break;
+    default:
+        goto locked;
+    }
+    nv2a_reg_log_read(NV_PGRAPH, addr, size, control);
+    return control;
+
+locked:
     qemu_mutex_lock(&pg->lock);
 
     uint64_t r = 0;
     switch (addr) {
-    case NV_PGRAPH_INTR:
-        r = pg->pending_interrupts;
-        break;
-    case NV_PGRAPH_INTR_EN:
-        r = pg->enabled_interrupts;
-        break;
     case NV_PGRAPH_RDI_DATA: {
         unsigned int select = PG_GET_MASK(NV_PGRAPH_RDI_INDEX,
                                        NV_PGRAPH_RDI_INDEX_SELECT);
@@ -808,6 +831,16 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
 
+    /*
+     * Only the guest writes the interrupt mask, always under the BQL, and
+     * nv2a_update_irq() reads it under the BQL. Waiting for pg->lock here
+     * would hold the vCPU behind renderer work (Mainkill1/xemu 86db8f664a).
+     */
+    if (addr == NV_PGRAPH_INTR_EN) {
+        qatomic_set(&pg->enabled_interrupts, val);
+        return;
+    }
+
     switch (addr) {
     case NV_PGRAPH_INTR:
     case NV_PGRAPH_INCREMENT:
@@ -835,9 +868,6 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
             pg->waiting_for_context_switch = false;
         }
         pfifo_kick(d);
-        break;
-    case NV_PGRAPH_INTR_EN:
-        pg->enabled_interrupts = val;
         break;
     case NV_PGRAPH_INCREMENT:
         if (val & NV_PGRAPH_INCREMENT_READ_3D) {
