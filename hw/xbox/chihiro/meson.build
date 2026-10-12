@@ -15,5 +15,6 @@ specific_ss.add(files(
 	'chihiro-spd.c',
 	'chihiro-usb.c',
 	'chihiro-v850.c',
+	'chihiro-widescreen.c',
 	'chihiro.c',
 ))

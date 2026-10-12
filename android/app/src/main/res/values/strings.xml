@@ -153,7 +153,9 @@
   <string name="settings_chihiro_controls">Cabinet controls</string>
   <string name="settings_chihiro_controls_gun">Light gun</string>
   <string name="settings_chihiro_controls_driving">Driving</string>
-  <string name="settings_chihiro_controls_hint">Light gun: touch to aim and fire, B reloads, LT is the pedal (Virtua Cop 3). Driving: left stick steers, RT accelerates, LT brakes, A/B are the gear lever, X changes view. The JVS analog channels differ per cabinet, so only one scheme can be active at a time.</string>
+  <string name="settings_chihiro_controls_hint">Light gun: touch to aim and fire, B reloads, LT is the pedal (Virtua Cop 3), D-pad Up inserts a card (Ghost Squad). Driving: left stick steers, RT accelerates, LT brakes, LB/RB shift down/up (OutRun 2, Maximum Tune), A/B drive/reverse (Crazy Taxi), X changes view, D-pad Up inserts a card (Maximum Tune). L3 is Test, R3 is Service. Maximum Tune needs its steering calibrated once in Test > Game Test.</string>
+  <string name="settings_chihiro_widescreen">Widescreen hack</string>
+  <string name="settings_chihiro_widescreen_desc">16:9 camera for OutRun 2 / SP, Maximum Tune 1 and 2, Crazy Taxi High Roller, Ollie King, Virtua Cop 3, Ghost Squad and House of the Dead 3. Unknown revisions stay 4:3. Set the display mode to 16:9 or Fit. Gun games need their gun calibration redone afterwards.</string>
   <string name="settings_chihiro_folder_desc">Already-extracted Chihiro games can be used directly. Pick the folder that holds boot.id and the game’s .xbe; it is copied into the emulator’s storage and selected as the disc.</string>
   <string name="settings_chihiro_folder_pick">Use Chihiro game folder</string>
   <string name="chihiro_copying">Copying Chihiro game folder…</string>

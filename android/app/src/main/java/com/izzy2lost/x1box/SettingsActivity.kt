@@ -200,6 +200,7 @@ class SettingsActivity : AppCompatActivity() {
   private lateinit var gpuNotSupportedText: TextView
   private lateinit var btnInstallDriver: MaterialButton
   private lateinit var switchChihiro: MaterialSwitch
+  private lateinit var switchChihiroWidescreen: MaterialSwitch
   private lateinit var tvChihiroMbRomStatus: TextView
   private lateinit var btnPickChihiroMbRom: MaterialButton
   private lateinit var btnPickChihiroFolder: MaterialButton
@@ -384,6 +385,7 @@ class SettingsActivity : AppCompatActivity() {
     gpuNotSupportedText   = findViewById(R.id.settings_gpu_not_supported)
     btnInstallDriver      = findViewById(R.id.btn_install_driver)
     switchChihiro         = findViewById(R.id.switch_chihiro)
+    switchChihiroWidescreen = findViewById(R.id.switch_chihiro_widescreen)
     val toggleChihiroControls =
       findViewById<MaterialButtonToggleGroup>(R.id.toggle_chihiro_controls)
     tvChihiroMbRomStatus  = findViewById(R.id.settings_chihiro_mbrom_status)
@@ -505,6 +507,7 @@ class SettingsActivity : AppCompatActivity() {
     switchNetworkEnable.isChecked =
       prefs.getBoolean("setting_network_enable", false)
     switchChihiro.isChecked = prefs.getBoolean("setting_chihiro", false)
+    switchChihiroWidescreen.isChecked = prefs.getBoolean("setting_chihiro_widescreen", false)
     when (prefs.getString("setting_chihiro_controls", "gun")) {
       "driving" -> toggleChihiroControls.check(R.id.btn_chihiro_driving)
       else      -> toggleChihiroControls.check(R.id.btn_chihiro_gun)
@@ -605,6 +608,7 @@ class SettingsActivity : AppCompatActivity() {
         .putBoolean(DebugLog.PREF_ENABLED, enableDebugLogs)
         .putBoolean("setting_network_enable", switchNetworkEnable.isChecked)
         .putBoolean("setting_chihiro", switchChihiro.isChecked)
+        .putBoolean("setting_chihiro_widescreen", switchChihiroWidescreen.isChecked)
         .putString("setting_chihiro_controls",
                    if (toggleChihiroControls.checkedButtonId == R.id.btn_chihiro_driving)
                      "driving" else "gun")
@@ -1224,6 +1228,8 @@ class SettingsActivity : AppCompatActivity() {
       ?.lowercase(Locale.US)
       ?.takeIf { it == "gun" || it == "driving" }
       ?.let { editor.putString("setting_chihiro_controls", it) }
+    parseTomlBoolean(sections, "chihiro.settings", "widescreen")
+      ?.let { editor.putBoolean("setting_chihiro_widescreen", it) }
     parseTomlBoolean(sections, "sys", "chihiro")
       ?.let {
         editor.putBoolean("setting_chihiro", it)

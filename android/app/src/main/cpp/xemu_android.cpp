@@ -726,6 +726,7 @@ struct DisplaySettings {
   int mem_limit_mib = 64;
   bool chihiro = false;  // Sega Chihiro arcade board (implies 128 MiB)
   std::string chihiro_controls = "gun";  // or "driving"
+  bool chihiro_widescreen = false;  // 16:9 camera patch for known games
   bool vsync = false;
   bool unlock_framerate = true;
   bool validation_layers = false;
@@ -841,6 +842,11 @@ static bool WriteConfigToml(const std::string& config_path,
   sys->insert_or_assign("mem_limit", ds.mem_limit_mib == 128 ? "128" : "64");
   sys->insert_or_assign("chihiro", ds.chihiro);
   sys->insert_or_assign("chihiro_controls", ds.chihiro_controls);
+  toml::table* chihiro = EnsureTable(tbl, "chihiro");
+  toml::table* chihiro_settings = chihiro ? EnsureTable(*chihiro, "settings") : nullptr;
+  if (chihiro_settings) {
+    chihiro_settings->insert_or_assign("widescreen", ds.chihiro_widescreen);
+  }
 
   files->insert_or_assign("bootrom_path", mcpx);
   files->insert_or_assign("flashrom_path", flash);
@@ -1056,6 +1062,7 @@ static SetupFiles SyncSetupFiles() {
     std::string ctl = GetPrefString(env, activity, "setting_chihiro_controls");
     ds.chihiro_controls = (ctl == "driving") ? "driving" : "gun";
   }
+  ds.chihiro_widescreen = GetPrefBool(env, activity, "setting_chihiro_widescreen", false);
   if (ds.chihiro) {
     ds.mem_limit_mib = 128;  // the baseboard is only wired up on a 128 MiB machine
   }

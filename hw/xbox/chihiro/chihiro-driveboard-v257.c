@@ -164,6 +164,14 @@ void v257_tick(V257DriveBoard *db)
         db->torque = 0;
 
     v257_emit(db);
+
+    static unsigned log_ticks;
+    if (++log_ticks % 60 == 0) {
+        CHIHIRO_LOGF(FFB, "V257 wheel: state %u target %03X spring %02X "
+                     "rest %03X stick %d -> wheel %03X\n", db->state,
+                     db->position, db->force_a, db->rest, db->steer,
+                     db->wheel);
+    }
 }
 
 void v257_init(V257DriveBoard *db)
@@ -171,6 +179,10 @@ void v257_init(V257DriveBoard *db)
     memset(db, 0, sizeof(*db));
     db->state = V257_BOOTING;
     db->position = 0x1FF;
+    /* Centred, as JVS's 0x8000 is, until the first input sample. Left at 0
+     * the game's first look finds the wheel hard over to one side. */
+    db->wheel = 0x200;
+    db->rest = 0x200;
 }
 
 /* The cabinet's motor line, as the JVS general-purpose output drives it. The
@@ -187,6 +199,41 @@ void v257_set_motor(V257DriveBoard *db, bool on)
 void v257_set_wheel(V257DriveBoard *db, uint16_t pos)
 {
     db->wheel = pos > 0x3FF ? 0x3FF : pos;
+}
+
+/* A stick is not a wheel: let go of a real one and the motor's spring holds
+ * it where the game asks (the target, its calibrated centre while it
+ * self-centres), not at the middle of the encoder's range. Maximum Tune's
+ * menus hold 0x1E8; a released stick reported as 0x200 read 0x18 to the
+ * right of the game's centre and everything pulled right. So a released
+ * stick rests where the spring holds the wheel, and a full deflection still
+ * reaches the end stop on that side. With no spring (a slide, the motor off)
+ * the wheel stays where it last rested. */
+static void v257_update_wheel(V257DriveBoard *db)
+{
+    int rest, d = db->steer, pos;
+
+    if (db->state == V257_POWERED && db->force_a) {
+        db->rest = db->position;
+    }
+    rest = db->rest;
+    if (d >= 0) {
+        pos = rest + (int)((int64_t)d * (0x3FF - rest) / 32767);
+    } else {
+        pos = rest + (int)((int64_t)d * rest / 32768);
+    }
+    db->wheel = pos < 0 ? 0 : pos > 0x3FF ? 0x3FF : pos;
+}
+
+void v257_set_steer(V257DriveBoard *db, int16_t deflection)
+{
+    db->steer = deflection;
+    v257_update_wheel(db);
+}
+
+uint16_t v257_wheel(V257DriveBoard *db)
+{
+    return db->wheel;
 }
 
 void v257_receive_byte(V257DriveBoard *db, uint8_t byte)
@@ -248,6 +295,7 @@ void v257_receive_byte(V257DriveBoard *db, uint8_t byte)
     delta = (int16_t)(raw - db->position);
     if (delta > -0x70 && delta < 0x70)
         db->position = raw;
+    v257_update_wheel(db);
 
     /* Powering up, the board takes the frame but answers nothing. */
     if (db->state != V257_POWERED)

@@ -1172,6 +1172,14 @@ static void midi_rx_deliver(AN2131State *s)
         s->midi_response_set_cycles = s->total_cycles;
     }
 
+    /* The V257's answers come in on the same UART1 path the SC's USB drain
+     * and feeder use: an RX interrupt in the middle of a drain clobbers the
+     * firmware's shared work pointers, as card_rx_deliver notes, and the
+     * wheel position the game reads is lost. Hold the bytes until the reply
+     * is armed. (From rcl0ng/chihiro-libretro.) */
+    if (chihiro_cabinet_drive_board() == CHIHIRO_DRIVE_V257 &&
+        s->in_setup && !s->ep[0].in_armed) return;
+
     Cpu8051State *cpu = &s->cpu;
     if (cpu->in_interrupt) return;
     if (cpu->sfr[0xC0 - 0x80] & 0x01) return;  /* RI1 still set */

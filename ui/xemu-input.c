@@ -26,6 +26,7 @@
 #include "qobject/qdict.h"
 #include "qemu/option.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
 #include "qemu/config-file.h"
 
 #include "xemu-input.h"
@@ -639,7 +640,39 @@ static uint16_t xemu_input_jvs_merged_pad(int16_t *lstick_x, int16_t *rtrig,
     return pad;
 }
 
-static void xemu_input_update_jvs_driving(ChihiroJVSState *jvs)
+/* A card reader's Card In key; the reader code wants the big lock. */
+static void xemu_input_jvs_card_key(int player)
+{
+    bool locked = bql_locked();
+
+    if (!locked) {
+        bql_lock();
+    }
+    if (player < 0) {
+        chihiro_crp1231_card_key();
+    } else {
+        chihiro_hw210_card_key(player);
+    }
+    chihiro_card_ui_sync();
+    if (!locked) {
+        bql_unlock();
+    }
+}
+
+/*
+ * The per-game layouts follow rcl0ng/chihiro-libretro, whose maintainer
+ * played each cabinet through:
+ *
+ *   all      Start, Back coin, L3 TEST, R3 SERVICE
+ *   OutRun 2 LB/RB shift down/up (player 2's switch word on that cabinet),
+ *            X view
+ *   Crazy Taxi  A Drive, B Reverse (the lever stays where it was put), X jump
+ *   Maximum Tune  LB/RB shift through an H-pattern that stays in gear,
+ *            X view, Y intrude, D-pad Up card in/out
+ *   Ollie King  stick swings the board, LT/RT or D-pad Up/Down are the foot
+ *            sensors, A or LB grab left, B or RB grab right
+ */
+static void xemu_input_update_jvs_driving(ChihiroJVSState *jvs, int profile)
 {
     const bool *kbd = SDL_GetKeyboardState(NULL);
 
@@ -656,38 +689,96 @@ static void xemu_input_update_jvs_driving(ChihiroJVSState *jvs)
     if (pad & CONTROLLER_BUTTON_DPAD_LEFT)  steer = -32768;
     if (pad & CONTROLLER_BUTTON_DPAD_RIGHT) steer = 32767;
 
-    /* Signed stick -> 16-bit unsigned, centred; triggers -> 0..0xFFFF. */
-    jvs->analog[0] = (uint16_t)(steer + 32768);
-    /* Maximum Tune reads the wheel from the V257 drive board's encoder (10
-     * bits), not from the JVS channel; left alone it sits at one end. */
-    if (chihiro_v257_global) {
-        v257_set_wheel(chihiro_v257_global, jvs->analog[0] >> 6);
-    }
-    jvs->analog[1] = (uint16_t)(accel < 0 ? 0 : accel * 2);
-    jvs->analog[2] = (uint16_t)(brake < 0 ? 0 : brake * 2);
-    jvs->analog[3] = 0x8000;
+    static uint16_t prev_pad;
+    uint16_t pressed = pad & ~prev_pad;
+    prev_pad = pad;
 
-    uint8_t sw0 = 0;
+    uint8_t sw0 = 0, sw1 = 0, p2sw0 = 0;
     if (kbd[g_config.input.keyboard_controller_scancode_map.start] ||
         (pad & CONTROLLER_BUTTON_START)) {
         sw0 |= 0x80;                 /* START */
     }
-    if (kbd[SDL_SCANCODE_9] || (pad & CONTROLLER_BUTTON_WHITE)) {
+    if (kbd[SDL_SCANCODE_9] || (pad & CONTROLLER_BUTTON_RSTICK)) {
         sw0 |= 0x40;                 /* SERVICE */
     }
-    /* PUSH1/PUSH2 are the gear lever on Crazy Taxi and the shifter on
-     * OutRun 2; PUSH3 is the view change both of them have. */
-    if (pad & CONTROLLER_BUTTON_A) sw0 |= 0x02;
-    if (pad & CONTROLLER_BUTTON_B) sw0 |= 0x01;
-    jvs->player_switches[0][0] = sw0;
 
-    uint8_t sw1 = 0;
-    if (pad & CONTROLLER_BUTTON_X) sw1 |= 0x80;  /* PUSH3 - view change */
-    if (pad & CONTROLLER_BUTTON_Y) sw1 |= 0x40;  /* PUSH4 */
+    /* Signed stick -> 16-bit unsigned, centred; triggers -> 0..0xFFFF. */
+    uint16_t wheel = (uint16_t)(steer + 32768);
+    uint16_t gas = (uint16_t)(accel < 0 ? 0 : accel * 2);
+    uint16_t pedal = (uint16_t)(brake < 0 ? 0 : brake * 2);
+
+    if (profile == CONFIG_CHIHIRO_JVS_PROFILE_OK) {
+        /* The board reads a swing left above centre, right below. */
+        jvs->analog[0] = 0;
+        jvs->analog[1] = (uint16_t)MIN(65535, 65536 - (unsigned)wheel);
+        jvs->analog[2] = 0;
+        if (pedal > 8191 || (pad & CONTROLLER_BUTTON_DPAD_UP)) {
+            sw0 |= 0x20;             /* front foot sensor */
+        }
+        if (gas > 8191 || (pad & CONTROLLER_BUTTON_DPAD_DOWN)) {
+            sw0 |= 0x10;             /* back foot sensor */
+        }
+        if (pad & (CONTROLLER_BUTTON_A | CONTROLLER_BUTTON_WHITE)) {
+            sw0 |= 0x02;             /* left grab */
+        }
+        if (pad & (CONTROLLER_BUTTON_B | CONTROLLER_BUTTON_BLACK)) {
+            sw0 |= 0x01;             /* right grab */
+        }
+    } else {
+        jvs->analog[0] = wheel;
+        jvs->analog[1] = gas;
+        jvs->analog[2] = pedal;
+    }
+    jvs->analog[3] = 0x8000;
+
+    if (profile == CONFIG_CHIHIRO_JVS_PROFILE_WMMT2) {
+        /* Maximum Tune reads the wheel twice: the menus from the V257 drive
+         * board's encoder (10 bits), a race from this JVS channel, each less
+         * the centre its steering calibration saved. Both measure the one
+         * column, so both follow the board's model of it, in which a
+         * released stick sits where the motor holds the wheel. */
+        if (chihiro_v257_global) {
+            v257_set_steer(chihiro_v257_global, steer);
+            uint16_t w = v257_wheel(chihiro_v257_global);
+            jvs->analog[0] = (uint16_t)(w << 6 | w >> 4);
+        }
+        /* The H-pattern shifter holds its gate between presses: neutral,
+         * then 1..6. */
+        static const uint8_t gate[7] = { 0, 0xA0, 0x60, 0x80, 0x40, 0x90, 0x50 };
+        static unsigned gear = 1;
+        if ((pressed & CONTROLLER_BUTTON_BLACK) && gear < 6) gear++;
+        if ((pressed & CONTROLLER_BUTTON_WHITE) && gear > 0) gear--;
+        sw1 |= gate[gear];
+        if (pad & CONTROLLER_BUTTON_X) sw1 |= 0x02;   /* view */
+        if (pad & CONTROLLER_BUTTON_Y) sw1 |= 0x01;   /* intrude */
+        if (pressed & CONTROLLER_BUTTON_DPAD_UP) {
+            xemu_input_jvs_card_key(-1);
+        }
+    } else if (profile == CONFIG_CHIHIRO_JVS_PROFILE_CTX) {
+        static bool forward = true;
+        if (pressed & CONTROLLER_BUTTON_A) forward = true;
+        if (pressed & CONTROLLER_BUTTON_B) forward = false;
+        sw0 |= forward ? 0x20 : 0x10;                 /* Drive / Reverse */
+        if (pad & CONTROLLER_BUTTON_X) sw0 |= 0x02;   /* jump */
+    } else if (profile == CONFIG_CHIHIRO_JVS_PROFILE_OR2) {
+        if (pad & CONTROLLER_BUTTON_X) sw0 |= 0x10;       /* view */
+        if (pad & CONTROLLER_BUTTON_BLACK) p2sw0 |= 0x20; /* shift up */
+        if (pad & CONTROLLER_BUTTON_WHITE) p2sw0 |= 0x10; /* shift down */
+    } else if (profile != CONFIG_CHIHIRO_JVS_PROFILE_OK) {
+        /* A game with no known layout, driven by the Driving setting:
+         * PUSH1..PUSH4. */
+        if (pad & CONTROLLER_BUTTON_A) sw0 |= 0x02;
+        if (pad & CONTROLLER_BUTTON_B) sw0 |= 0x01;
+        if (pad & CONTROLLER_BUTTON_X) sw1 |= 0x80;
+        if (pad & CONTROLLER_BUTTON_Y) sw1 |= 0x40;
+    }
+    jvs->player_switches[0][0] = sw0;
     jvs->player_switches[0][1] = sw1;
+    jvs->player_switches[1][0] = p2sw0;
+    jvs->player_switches[1][1] = 0;
 
     jvs->system_switches =
-        (kbd[SDL_SCANCODE_F2] || (pad & CONTROLLER_BUTTON_BLACK)) ? 0x80 : 0x00;
+        (kbd[SDL_SCANCODE_F2] || (pad & CONTROLLER_BUTTON_LSTICK)) ? 0x80 : 0x00;
 
     static bool coin_prev;
     bool coin_key = kbd[SDL_SCANCODE_5] || (pad & CONTROLLER_BUTTON_BACK);
@@ -709,10 +800,11 @@ static void xemu_input_update_jvs_lightgun(void)
     int profile = chihiro_detected_game_profile();
     bool driving_game = profile == CONFIG_CHIHIRO_JVS_PROFILE_CTX ||
                         profile == CONFIG_CHIHIRO_JVS_PROFILE_OR2 ||
-                        profile == CONFIG_CHIHIRO_JVS_PROFILE_WMMT2;
+                        profile == CONFIG_CHIHIRO_JVS_PROFILE_WMMT2 ||
+                        profile == CONFIG_CHIHIRO_JVS_PROFILE_OK;
     if (driving_game ||
         g_config.sys.chihiro_controls == CONFIG_SYS_CHIHIRO_CONTROLS_DRIVING) {
-        xemu_input_update_jvs_driving(jvs);
+        xemu_input_update_jvs_driving(jvs, profile);
         return;
     }
 
@@ -781,6 +873,14 @@ static void xemu_input_update_jvs_lightgun(void)
     bool pedal = ltrig > 8192;
     pedal = pedal || kbd[SDL_SCANCODE_LCTRL];
 
+    /* D-pad Up is Card In (Ghost Squad's player 1 slot). */
+    static bool card_prev;
+    bool card = (pad & CONTROLLER_BUTTON_DPAD_UP) != 0;
+    if (card && !card_prev) {
+        xemu_input_jvs_card_key(0);
+    }
+    card_prev = card;
+
     bool offscreen = !(mx >= 0 && mx <= winW && my >= 0 && my <= winH);
     bool trigger = (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) != 0;
     bool reload  = (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0 ||
@@ -824,6 +924,11 @@ static void xemu_input_update_jvs_lightgun(void)
         /* PUSH4 (byte 1 bit 6). Virtua Cop 3 is the only one of these
          * cabinets with a pedal; the others simply never read it. */
         sw1 |= 0x40;
+    }
+    /* Ghost Squad's slot microswitch: a card sits in the drawer. */
+    if (profile == CONFIG_CHIHIRO_JVS_PROFILE_GS &&
+        chihiro_card_reader_present(0)) {
+        sw1 |= 0x20;
     }
     jvs->player_switches[0][1] = sw1;
 
