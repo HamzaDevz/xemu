@@ -11,6 +11,7 @@
  */
 
 #include "qemu/bitops.h"
+#include "tcg/xbox-fastmem.h"
 
 /* Used for function call generation. */
 #define TCG_REG_CALL_STACK              TCG_REG_SP
@@ -1683,9 +1684,35 @@ static const TCGLdstHelperParam ldst_helper_param = {
     .ntmp = 1, .tmp = { TCG_REG_TMP0 }
 };
 
+static void tcg_out_tlb_probe(TCGContext *s, HostAddress *h,
+                              TCGLabelQemuLdst *ldst, TCGReg addr_reg,
+                              MemOpIdx oi, bool is_ld, unsigned a_mask);
+static void tcg_out_qemu_ld_direct(TCGContext *s, MemOp memop, TCGType ext,
+                                   TCGReg data_r, HostAddress h);
+static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
+                                   TCGReg data_r, HostAddress h);
+
 static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 {
     MemOp opc = get_memop(lb->oi);
+
+#if XBOX_FASTMEM_SUPPORTED
+    if (lb->fastmem_ptr) {
+        /*
+         * Fallback for a window load (see accel/tcg/xbox-fastmem.c): the
+         * ordinary inline TLB probe and load, then the helper call below.
+         * Faults are redirected here, and a site that hits a page which
+         * can never be mirrored is patched to branch here directly.
+         */
+        const void *stub = tcg_splitwx_to_rx(s->code_ptr);
+        HostAddress h;
+
+        tcg_out_tlb_probe(s, &h, lb, lb->addr_reg, lb->oi, true, 0);
+        tcg_out_qemu_ld_direct(s, opc, lb->type, lb->datalo_reg, h);
+        tcg_out_goto(s, lb->raddr);
+        xbox_fastmem_record(tcg_splitwx_to_rx(lb->fastmem_ptr), stub);
+    }
+#endif
 
     if (!reloc_pc19(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
         return false;
@@ -1702,6 +1729,19 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 {
     MemOp opc = get_memop(lb->oi);
 
+#if XBOX_FASTMEM_SUPPORTED
+    if (lb->fastmem_ptr) {
+        /* As for loads: the ordinary probe and store, then the helper. */
+        const void *stub = tcg_splitwx_to_rx(s->code_ptr);
+        HostAddress h;
+
+        tcg_out_tlb_probe(s, &h, lb, lb->addr_reg, lb->oi, false, 0);
+        tcg_out_qemu_st_direct(s, opc, lb->datalo_reg, h);
+        tcg_out_goto(s, lb->raddr);
+        xbox_fastmem_record(tcg_splitwx_to_rx(lb->fastmem_ptr), stub);
+    }
+#endif
+
     if (!reloc_pc19(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
         return false;
     }
@@ -1714,6 +1754,74 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 
 /* We expect to use a 7-bit scaled negative offset from ENV.  */
 #define MIN_TLB_MASK_TABLE_OFS  -512
+
+/*
+ * Emit the softmmu TLB probe for @addr_reg: on a hit fall through with
+ * @h describing the host address, on a miss branch to @ldst's slow path.
+ */
+static void tcg_out_tlb_probe(TCGContext *s, HostAddress *h,
+                              TCGLabelQemuLdst *ldst, TCGReg addr_reg,
+                              MemOpIdx oi, bool is_ld, unsigned a_mask)
+{
+    TCGType addr_type = s->addr_type;
+    MemOp s_bits = get_memop(oi) & MO_SIZE;
+    unsigned s_mask = (1u << s_bits) - 1;
+    unsigned mem_index = get_mmuidx(oi);
+    TCGReg addr_adj;
+    uint64_t compare_mask;
+
+    /* Load CPUTLBDescFast.{mask,table} into {tmp0,tmp1}. */
+    QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, mask) != 0);
+    QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, table) != 8);
+    tcg_out_insn(s, 3314, LDP, TCG_REG_TMP0, TCG_REG_TMP1, TCG_AREG0,
+                 tlb_mask_table_ofs(s, mem_index), 1, 0);
+
+    /* Extract the TLB index from the address into X0.  */
+    tcg_out_insn(s, 3502S, AND_LSR, TCG_TYPE_I64,
+                 TCG_REG_TMP0, TCG_REG_TMP0, addr_reg,
+                 TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+
+    /* Add the tlb_table pointer, forming the CPUTLBEntry address. */
+    tcg_out_insn(s, 3502, ADD, 1, TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP0);
+
+    /* Load the tlb comparator into TMP0, and the fast path addend. */
+    QEMU_BUILD_BUG_ON(HOST_BIG_ENDIAN);
+    tcg_out_ld(s, addr_type, TCG_REG_TMP0, TCG_REG_TMP1,
+               is_ld ? offsetof(CPUTLBEntry, addr_read)
+                     : offsetof(CPUTLBEntry, addr_write));
+    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP1, TCG_REG_TMP1,
+               offsetof(CPUTLBEntry, addend));
+
+    /*
+     * For aligned accesses, we check the first byte and include
+     * the alignment bits within the address.  For unaligned access,
+     * we check that we don't cross pages using the address of the
+     * last byte of the access.
+     */
+    if (a_mask >= s_mask) {
+        addr_adj = addr_reg;
+    } else {
+        addr_adj = TCG_REG_TMP2;
+        tcg_out_insn(s, 3401, ADDI, addr_type,
+                     addr_adj, addr_reg, s_mask - a_mask);
+    }
+    compare_mask = (uint64_t)TARGET_PAGE_MASK | a_mask;
+
+    /* Store the page mask part of the address into TMP2.  */
+    tcg_out_logicali(s, I3404_ANDI, addr_type, TCG_REG_TMP2,
+                     addr_adj, compare_mask);
+
+    /* Perform the address comparison. */
+    tcg_out_cmp(s, addr_type, TCG_COND_NE, TCG_REG_TMP0, TCG_REG_TMP2, 0);
+
+    /* If not equal, we jump to the slow path. */
+    ldst->label_ptr[0] = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
+
+    h->base = TCG_REG_TMP1;
+    h->index = addr_reg;
+    h->index_ext = addr_type;
+}
 
 /*
  * For system-mode, perform the TLB load and compare.
@@ -1738,10 +1846,23 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     a_mask = (1 << h->aa.align) - 1;
 
     if (tcg_use_softmmu) {
-        unsigned s_mask = (1u << s_bits) - 1;
-        unsigned mem_index = get_mmuidx(oi);
-        TCGReg addr_adj;
-        uint64_t compare_mask;
+#if XBOX_FASTMEM_SUPPORTED
+        if (xbox_fastmem_codegen && (is_ld || xbox_fastmem_stores) &&
+            get_mmuidx(oi) == XBOX_FASTMEM_MMU_IDX &&
+            addr_type == TCG_TYPE_I32 && a_mask == 0 && s_bits <= MO_64 &&
+            xbox_fastmem_can_record()) {
+            /* One access to the guest-virtual window; see xbox-fastmem.c. */
+            ldst = new_ldst_label(s);
+            ldst->is_ld = is_ld;
+            ldst->oi = oi;
+            ldst->addr_reg = addr_reg;
+            ldst->fastmem_ptr = s->code_ptr;
+            h->base = TCG_REG_XBOX_HOST_BASE;
+            h->index = addr_reg;
+            h->index_ext = TCG_TYPE_I32;
+            return ldst;
+        }
+#endif
 #ifdef XBOX
         tcg_insn_unit *xbox_fast_done = NULL;
         tcg_insn_unit *xbox_vram_done = NULL;
@@ -1823,58 +1944,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         ldst->is_ld = is_ld;
         ldst->oi = oi;
         ldst->addr_reg = addr_reg;
-
-        /* Load CPUTLBDescFast.{mask,table} into {tmp0,tmp1}. */
-        QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, mask) != 0);
-        QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, table) != 8);
-        tcg_out_insn(s, 3314, LDP, TCG_REG_TMP0, TCG_REG_TMP1, TCG_AREG0,
-                     tlb_mask_table_ofs(s, mem_index), 1, 0);
-
-        /* Extract the TLB index from the address into X0.  */
-        tcg_out_insn(s, 3502S, AND_LSR, TCG_TYPE_I64,
-                     TCG_REG_TMP0, TCG_REG_TMP0, addr_reg,
-                     TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
-
-        /* Add the tlb_table pointer, forming the CPUTLBEntry address. */
-        tcg_out_insn(s, 3502, ADD, 1, TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP0);
-
-        /* Load the tlb comparator into TMP0, and the fast path addend. */
-        QEMU_BUILD_BUG_ON(HOST_BIG_ENDIAN);
-        tcg_out_ld(s, addr_type, TCG_REG_TMP0, TCG_REG_TMP1,
-                   is_ld ? offsetof(CPUTLBEntry, addr_read)
-                         : offsetof(CPUTLBEntry, addr_write));
-        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP1, TCG_REG_TMP1,
-                   offsetof(CPUTLBEntry, addend));
-
-        /*
-         * For aligned accesses, we check the first byte and include
-         * the alignment bits within the address.  For unaligned access,
-         * we check that we don't cross pages using the address of the
-         * last byte of the access.
-         */
-        if (a_mask >= s_mask) {
-            addr_adj = addr_reg;
-        } else {
-            addr_adj = TCG_REG_TMP2;
-            tcg_out_insn(s, 3401, ADDI, addr_type,
-                         addr_adj, addr_reg, s_mask - a_mask);
-        }
-        compare_mask = (uint64_t)TARGET_PAGE_MASK | a_mask;
-
-        /* Store the page mask part of the address into TMP2.  */
-        tcg_out_logicali(s, I3404_ANDI, addr_type, TCG_REG_TMP2,
-                         addr_adj, compare_mask);
-
-        /* Perform the address comparison. */
-        tcg_out_cmp(s, addr_type, TCG_COND_NE, TCG_REG_TMP0, TCG_REG_TMP2, 0);
-
-        /* If not equal, we jump to the slow path. */
-        ldst->label_ptr[0] = s->code_ptr;
-        tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
-
-        h->base = TCG_REG_TMP1;
-        h->index = addr_reg;
-        h->index_ext = addr_type;
+        tcg_out_tlb_probe(s, h, ldst, addr_reg, oi, is_ld, a_mask);
 
 #ifdef XBOX
         if (xbox_fast_done) {
@@ -4304,6 +4374,11 @@ static void tcg_target_qemu_prologue(TCGContext *s)
                  (uintptr_t)&xbox_ram_fp);
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_XBOX_RAM_BASE);
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_XBOX_HOST_BASE);
+#if XBOX_FASTMEM_SUPPORTED
+    /* X26 = fastmem window base; callee-saved, so helpers preserve it. */
+    tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_XBOX_HOST_BASE,
+                 xbox_fastmem_window_base());
+#endif
 #endif
 
     tcg_out_mov(s, TCG_TYPE_PTR, TCG_AREG0, tcg_target_call_iarg_regs[0]);

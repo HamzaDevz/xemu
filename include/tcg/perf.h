@@ -23,6 +23,7 @@ void perf_report_code(uint64_t guest_pc, TranslationBlock *tb,
 
 /* Stop writing perf-<pid>.map and/or jit-<pid>.dump. */
 void perf_exit(void);
+void perf_android_maybe_enable(void);
 #else
 static inline void perf_enable_perfmap(void)
 {
@@ -38,6 +39,10 @@ static inline void perf_report_prologue(const void *start, size_t size)
 
 static inline void perf_report_code(uint64_t guest_pc, TranslationBlock *tb,
                                     const void *start)
+{
+}
+
+static inline void perf_android_maybe_enable(void)
 {
 }
 

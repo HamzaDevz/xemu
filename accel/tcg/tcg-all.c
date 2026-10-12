@@ -28,6 +28,7 @@
 #include "exec/replay-core.h"
 #include "exec/icount.h"
 #include "tcg/startup.h"
+#include "tcg/perf.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/accel.h"
@@ -152,6 +153,7 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
     page_init();
     tb_htable_init();
     tcg_init(s->tb_size * MiB, s->splitwx_enabled, max_threads);
+    perf_android_maybe_enable();
 
 #if defined(CONFIG_SOFTMMU)
     /*

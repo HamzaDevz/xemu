@@ -84,6 +84,13 @@ static struct tcg_region_state region;
 static void *region_trees;
 static size_t tree_size;
 
+/* Executable address of the start of the whole code buffer, and its size. */
+uintptr_t tcg_code_gen_buffer_rx_base(size_t *size)
+{
+    *size = region.total_size;
+    return (uintptr_t)region.start_aligned + tcg_splitwx_diff;
+}
+
 bool in_code_gen_buffer(const void *p)
 {
     /*

@@ -69,6 +69,9 @@
   <string name="library_convert_copy_input_failed">Failed to copy ISO into converter workspace.</string>
   <string name="library_convert_copy_output_failed">Failed to copy converted XISO back to games folder.</string>
   <string name="library_convert_resolve_failed">Could not resolve destination folder for selected game.</string>
+  <string name="library_exit_title">Exit %1$s?</string>
+  <string name="library_exit_message">Are you sure you want to close the app?</string>
+  <string name="library_exit_confirm">Exit</string>
   <string name="library_restart_failed">Unable to restart. The selected game is no longer accessible.</string>
   <string name="library_boot_dashboard_failed">Unable to boot the dashboard. One or more core files are no longer accessible.</string>
   <string name="library_boot_dashboard_missing_retail">No retail dashboard was found on the current HDD image. Import the Microsoft dashboard in Settings first.</string>

@@ -16,6 +16,10 @@
 #include "tcg/debuginfo.h"
 #include "tcg/perf.h"
 #include "tcg/tcg.h"
+#include "hw/core/cpu.h"
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 static FILE *safe_fopen_w(const char *path)
 {
@@ -309,6 +313,68 @@ static void write_jr_code_load(const void *start, uint16_t host_size,
     fwrite(start, host_size, 1, jitdump);
 }
 
+/*
+ * Profiling aid: setprop debug.xemu.tcg.perfmap 1 dumps every translated
+ * block (host code, guest pc per insn, guest bytes) to tbdump-<pid>.bin in
+ * the app's external files dir, so samples landing in the code buffer can be
+ * attributed to guest code offline.
+ */
+static FILE *tbdump;
+
+void perf_android_maybe_enable(void)
+{
+#ifdef __ANDROID__
+    char value[PROP_VALUE_MAX] = {};
+    char path[128];
+
+    if (__system_property_get("debug.xemu.tcg.perfmap", value) <= 0 ||
+        value[0] != '1') {
+        return;
+    }
+    snprintf(path, sizeof(path),
+             "/sdcard/Android/data/com.izzy2lost.x1box/files/tbdump-%d.bin",
+             getpid());
+    tbdump = safe_fopen_w(path);
+    if (tbdump) {
+        fchmod(fileno(tbdump), 0660);
+    } else {
+        warn_report("Could not open %s: %s", path, strerror(errno));
+    }
+#endif
+}
+
+static void write_tbdump(uint64_t guest_pc, TranslationBlock *tb,
+                         const void *start)
+{
+    uint64_t *data = tcg_ctx->gen_insn_data;
+    uint64_t hdr[2] = { (uintptr_t)start, guest_pc };
+    uint32_t sizes[3] = { tb->tc.size, tb->icount, tb->size };
+    uint8_t guest[4096];
+    uint32_t glen = MIN(tb->size, sizeof(guest));
+
+    if (!current_cpu ||
+        cpu_memory_rw_debug(current_cpu, guest_pc, guest, glen, false)) {
+        glen = 0;
+    }
+    flockfile(tbdump);
+    fwrite(hdr, sizeof(hdr), 1, tbdump);
+    fwrite(sizes, sizeof(sizes), 1, tbdump);
+    for (size_t i = 0; i < tb->icount; i++) {
+        uint64_t pc = data[i * INSN_START_WORDS];
+        uint32_t end = tcg_ctx->gen_insn_end_off[i];
+        if (tb_cflags(tb) & CF_PCREL) {
+            pc |= guest_pc & TARGET_PAGE_MASK;
+        }
+        fwrite(&pc, sizeof(pc), 1, tbdump);
+        fwrite(&end, sizeof(end), 1, tbdump);
+    }
+    fwrite(&glen, sizeof(glen), 1, tbdump);
+    fwrite(guest, glen, 1, tbdump);
+    fwrite(start, tb->tc.size, 1, tbdump);
+    fflush(tbdump);
+    funlockfile(tbdump);
+}
+
 void perf_report_code(uint64_t guest_pc, TranslationBlock *tb,
                       const void *start)
 {
@@ -316,6 +382,9 @@ void perf_report_code(uint64_t guest_pc, TranslationBlock *tb,
     size_t insn;
     uint64_t *gen_insn_data;
 
+    if (unlikely(tbdump)) {
+        write_tbdump(guest_pc, tb, start);
+    }
     if (!perfmap && !jitdump) {
         return;
     }

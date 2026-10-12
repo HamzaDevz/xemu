@@ -25,6 +25,7 @@ import android.widget.ProgressBar
 import android.widget.Space
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
@@ -228,12 +229,15 @@ class GameLibraryActivity : AppCompatActivity() {
       }
     }
 
+  private var exitDialog: androidx.appcompat.app.AlertDialog? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     OrientationLocker(this).enable()
     setContentView(R.layout.activity_game_library)
     EdgeToEdgeHelper.enable(this)
     EdgeToEdgeHelper.applySystemBarPadding(findViewById(R.id.library_scroll))
+    registerExitConfirmation()
 
     if (tryRestartLastGameFromIntent()) {
       return
@@ -310,6 +314,39 @@ class GameLibraryActivity : AppCompatActivity() {
   override fun onDestroy() {
     super.onDestroy()
     coverPersistenceExecutor.shutdownNow()
+  }
+
+  /*
+   * Back (including a controller's B button) on the library used to close the
+   * app instantly. Ask first when the library is the root of the task; from
+   * anywhere else Back keeps its normal meaning.
+   */
+  private fun registerExitConfirmation() {
+    onBackPressedDispatcher.addCallback(
+      this,
+      object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+          if (!isTaskRoot) {
+            isEnabled = false
+            onBackPressedDispatcher.onBackPressed()
+            isEnabled = true
+            return
+          }
+          if (exitDialog?.isShowing == true) {
+            return
+          }
+          exitDialog = MaterialAlertDialogBuilder(
+            this@GameLibraryActivity,
+            R.style.ThemeOverlay_Xemu_RoundedDialog
+          )
+            .setTitle(getString(R.string.library_exit_title, getString(R.string.app_name)))
+            .setMessage(R.string.library_exit_message)
+            .setPositiveButton(R.string.library_exit_confirm) { _, _ -> finish() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        }
+      }
+    )
   }
 
   private fun tryRestartLastGameFromIntent(): Boolean {

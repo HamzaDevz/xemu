@@ -55,6 +55,16 @@ static void *qemu_default_main(void *opaque)
     replay_mutex_unlock();
 
 #ifdef __ANDROID__
+#ifdef XBOX
+    /*
+     * The main-loop mutex is taken in qemu_init() and held by this thread
+     * except while polling, so it is still held here.  Release it before the
+     * thread ends: the render thread's shutdown loop locks it every frame,
+     * and would otherwise block forever on a mutex owned by a dead thread,
+     * so SDL_main never reaches _exit() and the app hangs on a black screen.
+     */
+    qemu_mutex_unlock_main_loop();
+#endif
     /* Let SDL_main join the emulator thread and terminate with _exit().
      * exit() runs Android's global destructors while its UI threads are
      * still alive, racing font/render callbacks against destroyed mutexes.

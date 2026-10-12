@@ -53,6 +53,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     private const val SNAPSHOT_PREVIEW_HEADER_SIZE = 12
     private const val TOTAL_SNAPSHOT_SLOTS = 10
     private const val TAG = "MainActivity"
+    private const val EXIT_WATCHDOG_MS = 8000L
   }
 
   private enum class PendingCloseAction {
@@ -1121,7 +1122,17 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     nativeExitEmulation()
     if (action == PendingCloseAction.QUIT_APP) {
       moveTaskToBack(true)
+    } else {
+      // The library joins this task, so drop the game screen from the back
+      // stack; otherwise Back/B from the library returns to a dead emulator.
+      finish()
     }
+    // Native teardown ends with _exit(). If shutdown ever wedges instead,
+    // don't leave a black, unresponsive emulator behind: kill the process.
+    Handler(Looper.getMainLooper()).postDelayed({
+      android.util.Log.w(TAG, "Emulator did not exit after close request; killing process")
+      android.os.Process.killProcess(android.os.Process.myPid())
+    }, EXIT_WATCHDOG_MS)
   }
 
   override fun getLibraries(): Array<String> = arrayOf(
