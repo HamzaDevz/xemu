@@ -49,7 +49,9 @@ android {
   namespace = "com.izzy2lost.x1box"
   compileSdk = 36
   buildToolsVersion = "36.1.0"
-  ndkVersion = "30.0.15729638"
+  /* local.properties `xemu.ndkVersion` builds with another installed NDK. */
+  ndkVersion = localProperties.getProperty("xemu.ndkVersion")?.trim()
+    ?.takeIf(String::isNotEmpty) ?: "30.0.15729638"
 
   defaultConfig {
     applicationId = "com.izzy2lost.x1box"
@@ -119,6 +121,28 @@ android {
       )
       if (hasReleaseKeystore) {
         signingConfig = signingConfigs.getByName("release")
+      }
+    }
+    /*
+     * Odin 3 fork build: release native code (ThinLTO) under its own package so
+     * it installs next to the stock X1 BOX, debuggable so the adb bench in
+     * tools/odin3 can seed its settings with run-as.
+     */
+    create("odin3") {
+      initWith(getByName("release"))
+      applicationIdSuffix = ".odin3"
+      isDebuggable = true
+      isMinifyEnabled = false
+      isShrinkResources = false
+      signingConfig = signingConfigs.getByName("debug")
+      matchingFallbacks += listOf("release")
+      externalNativeBuild {
+        cmake {
+          arguments += listOf("-DXEMU_ENABLE_LTO=ON")
+        }
+      }
+      ndk {
+        debugSymbolLevel = "NONE"
       }
     }
     create("profile") {
