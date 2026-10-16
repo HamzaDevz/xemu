@@ -1757,6 +1757,47 @@ Java_com_izzy2lost_x1box_MainActivity_nativeSetLightGun(JNIEnv *, jobject,
   g_lightgun_active = true;
 }
 
+/*
+ * Physical controller remap, edited in the in-game menu (ControllerRemap.kt).
+ *
+ * One slot per Xbox input: 0..13 are the gp.buttons bits (A B X Y, D-pad
+ * left/up/right/down, Back, Start, White, Black, LS, RS), 14 is LT and 15 is
+ * RT. Each holds the SDL source driving it: an SDL_GamepadButton, 100/101 for
+ * the left/right trigger axis, or -1 for unbound. xemu-input.c reads it while
+ * building each pad's state, so the table only has to be self-consistent per
+ * read, not swapped atomically.
+ */
+#define XEMU_ANDROID_REMAP_SLOTS 16
+static std::atomic<int> g_remap[XEMU_ANDROID_REMAP_SLOTS];
+static std::atomic<bool> g_remap_active{false};
+
+extern "C" bool xemu_android_remap_get(int *out)
+{
+  if (!g_remap_active.load(std::memory_order_acquire)) {
+    return false;
+  }
+  for (int i = 0; i < XEMU_ANDROID_REMAP_SLOTS; i++) {
+    out[i] = g_remap[i].load(std::memory_order_relaxed);
+  }
+  return true;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_izzy2lost_x1box_MainActivity_nativeSetControllerRemap(JNIEnv *env, jobject,
+                                                               jintArray table)
+{
+  if (!table || env->GetArrayLength(table) != XEMU_ANDROID_REMAP_SLOTS) {
+    g_remap_active.store(false, std::memory_order_release);
+    return;
+  }
+  jint values[XEMU_ANDROID_REMAP_SLOTS];
+  env->GetIntArrayRegion(table, 0, XEMU_ANDROID_REMAP_SLOTS, values);
+  for (int i = 0; i < XEMU_ANDROID_REMAP_SLOTS; i++) {
+    g_remap[i].store(values[i], std::memory_order_relaxed);
+  }
+  g_remap_active.store(true, std::memory_order_release);
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_izzy2lost_x1box_MainActivity_nativeGetFps(JNIEnv *, jobject)
 {

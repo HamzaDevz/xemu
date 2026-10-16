@@ -1119,6 +1119,79 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
 #undef KBD_STATE
 }
 
+#ifdef __ANDROID__
+#define ANDROID_REMAP_SLOTS 16
+#define ANDROID_REMAP_SRC_LTRIG 100
+#define ANDROID_REMAP_SRC_RTRIG 101
+#define ANDROID_REMAP_PRESS_THRESHOLD 9830 /* 30% of a trigger's travel */
+
+extern bool xemu_android_remap_get(int *out);
+
+/*
+ * The on-screen controller is drawn with labelled buttons and moved around
+ * by the user instead, so the remap must not apply to it. MainActivity
+ * registers it on the Bluetooth bus as 045e:028e, and SDL folds a CRC of
+ * its descriptor string into the GUID, which no real pad shares.
+ */
+static bool android_is_onscreen_pad(const ControllerState *state)
+{
+    static const char desc[] = "Virtual touchscreen controller";
+    const Uint8 *g = state->sdl_joystick_guid.data;
+    Uint16 crc = g[2] | (g[3] << 8);
+    Uint16 vendor = g[4] | (g[5] << 8);
+    Uint16 product = g[8] | (g[9] << 8);
+    return vendor == 0x045e && product == 0x028e &&
+           crc == SDL_crc16(0, desc, sizeof(desc) - 1);
+}
+
+/* Value of a remap source, 0..32767. */
+static int android_remap_source(ControllerState *state, int src)
+{
+    if (src >= 0 && src < SDL_GAMEPAD_BUTTON_COUNT) {
+        return SDL_GetGamepadButton(state->sdl_gamecontroller, src) ? 32767
+                                                                    : 0;
+    }
+    if (src == ANDROID_REMAP_SRC_LTRIG || src == ANDROID_REMAP_SRC_RTRIG) {
+        bool left = src == ANDROID_REMAP_SRC_LTRIG;
+        int v = SDL_GetGamepadAxis(state->sdl_gamecontroller,
+                                   left ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER :
+                                          SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+        /*
+         * Pads whose triggers only send KEYCODE_BUTTON_L2/R2 get no trigger
+         * in SDL's generated Android mapping; the keys land on raw joystick
+         * buttons 15 and 16 (keycode_to_SDL), so read those as well.
+         */
+        if (SDL_GetJoystickButton(state->sdl_joystick, left ? 15 : 16)) {
+            v = 32767;
+        }
+        return MAX(v, 0);
+    }
+    return 0;
+}
+
+/*
+ * Fill the buttons and triggers from the user's remap. Slots 0..13 are the
+ * gp.buttons bits, 14 and 15 the LT/RT axes. Returns false when no remap is
+ * set, leaving the gamepad_mappings path in charge.
+ */
+static bool android_apply_remap(ControllerState *state)
+{
+    int remap[ANDROID_REMAP_SLOTS];
+    if (android_is_onscreen_pad(state) || !xemu_android_remap_get(remap)) {
+        return false;
+    }
+    for (int i = 0; i < 14; i++) {
+        if (android_remap_source(state, remap[i]) >
+            ANDROID_REMAP_PRESS_THRESHOLD) {
+            state->gp.buttons |= 1 << i;
+        }
+    }
+    state->gp.axis[CONTROLLER_AXIS_LTRIG] = android_remap_source(state, remap[14]);
+    state->gp.axis[CONTROLLER_AXIS_RTRIG] = android_remap_source(state, remap[15]);
+    return true;
+}
+#endif
+
 void xemu_input_update_sdl_controller_state(ControllerState *state)
 {
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
@@ -1168,20 +1241,28 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
          (state)->controller_map->controller_mapping.btn) \
      << idx)
 
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, a, 0);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, b, 1);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, x, 2);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, y, 3);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_left, 4);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_up, 5);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_right, 6);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_down, 7);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, back, 8);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, start, 9);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, lshoulder, 10);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, rshoulder, 11);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, lstick_btn, 12);
-    state->gp.buttons |= XEMU_MASK_BUTTON(state, rstick_btn, 13);
+#ifdef __ANDROID__
+    bool remapped = android_apply_remap(state);
+#else
+    bool remapped = false;
+#endif
+
+    if (!remapped) {
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, a, 0);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, b, 1);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, x, 2);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, y, 3);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_left, 4);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_up, 5);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_right, 6);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, dpad_down, 7);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, back, 8);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, start, 9);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, lshoulder, 10);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, rshoulder, 11);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, lstick_btn, 12);
+        state->gp.buttons |= XEMU_MASK_BUTTON(state, rstick_btn, 13);
+    }
     state->gp.buttons |= XEMU_MASK_BUTTON(state, guide, 14);
 
 #undef XEMU_MASK_BUTTON
@@ -1191,8 +1272,10 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
         (state)->sdl_gamecontroller, \
         (state)->controller_map->controller_mapping.axis)
 
-    state->gp.axis[0] = SDL_GET_AXIS(state, axis_trigger_left);
-    state->gp.axis[1] = SDL_GET_AXIS(state, axis_trigger_right);
+    if (!remapped) {
+        state->gp.axis[0] = SDL_GET_AXIS(state, axis_trigger_left);
+        state->gp.axis[1] = SDL_GET_AXIS(state, axis_trigger_right);
+    }
     state->gp.axis[2] = SDL_GET_AXIS(state, axis_left_x);
     state->gp.axis[3] = SDL_GET_AXIS(state, axis_left_y);
     state->gp.axis[4] = SDL_GET_AXIS(state, axis_right_x);
