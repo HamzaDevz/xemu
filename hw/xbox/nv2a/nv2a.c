@@ -204,6 +204,11 @@ int nv2a_get_screen_off(void)
     return g_nv2a->vga.sr[VGA_SEQ_CLOCK_MODE] & VGA_SR01_SCREEN_OFF;
 }
 
+uint32_t nv2a_get_display_seq(void)
+{
+    return g_nv2a ? qatomic_read(&g_nv2a->display_seq) : 0;
+}
+
 static int64_t nv2a_calc_vblank_period_ns(NV2AState *d)
 {
     uint32_t vdisplay = d->pramdac.fp_vdisplay_end;
@@ -333,6 +338,7 @@ static void nv2a_vblank_timer_cb(void *opaque)
     d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
     d->pcrtc.raster = 0;
     nv2a_update_irq(d);
+    qatomic_inc(&d->display_seq);
 
     /*
      * Advance the VBLANK target.

@@ -122,6 +122,7 @@ void nv2a_android_request_display_capture(void)
     PGRAPHVkDisplayState *disp = &g_nv2a->pgraph.vk_renderer_state->display;
     qatomic_cmpxchg(&disp->capture.state, DISPLAY_CAPTURE_IDLE,
                     DISPLAY_CAPTURE_REQUESTED);
+    qatomic_inc(&g_nv2a->display_seq);
 }
 
 bool nv2a_android_display_capture_ready(void)
@@ -948,6 +949,9 @@ static void destroy_current_display_image(PGRAPHState *pg)
     d->display_idx = 0;
     d->image_count = 0;
     d->draw_time = 0;
+#ifdef __ANDROID__
+    d->presented_surface = NULL;
+#endif
 }
 
 static bool create_single_display_image_resources(PGRAPHState *pg,
@@ -2501,6 +2505,12 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
 
     disp->draw_time = surface->draw_time;
+#ifdef __ANDROID__
+    if (disp->direct_present) {
+        disp->presented_surface = surface;
+        disp->presented_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+#endif
 }
 
 static void create_surface_sampler(PGRAPHState *pg)
@@ -2616,6 +2626,28 @@ void pgraph_vk_render_display(PGRAPHState *pg)
             return;
         }
     }
+
+#ifdef __ANDROID__
+    /*
+     * The display loop syncs on every VBLANK and flip, but a game changes the
+     * picture on only some of them (a 30 fps game flips on every other
+     * VBLANK). Presenting the same frame again costs a full-screen pass and a
+     * present for nothing: skip it unless the displayed surface, its contents,
+     * the overlay or a capture request changed. The keepalive still presents
+     * a few times a second, so a replaced Android surface gets noticed.
+     */
+    if (disp->direct_present && disp->swapchain != VK_NULL_HANDLE &&
+        surface == disp->presented_surface &&
+        display_addr == disp->presented_addr &&
+        surface->draw_time == disp->draw_time && !surface->upload_pending &&
+        !get_pvideo_state(pg).enabled &&
+        qatomic_read(&disp->capture.state) != DISPLAY_CAPTURE_REQUESTED &&
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - disp->presented_ns <
+            250 * SCALE_MS) {
+        return;
+    }
+    disp->presented_addr = display_addr;
+#endif
 
     disp->blend_active =
         !disp->direct_present && !r->frame_was_skipped &&

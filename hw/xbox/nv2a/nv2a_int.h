@@ -100,6 +100,9 @@ typedef struct NV2AState {
     int64_t avg_frame_ns;
     int64_t vblank_defer_request_ns;
     bool unlock_mode_active;
+    /* Bumped (atomically) on every VBLANK and CRTC start write, see
+     * nv2a_get_display_seq() */
+    uint32_t display_seq;
 
 #define DEFER_RING_SIZE 16
     uint8_t defer_ring[DEFER_RING_SIZE];

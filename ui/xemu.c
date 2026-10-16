@@ -1574,9 +1574,21 @@ void xemu_android_display_loop(void)
              * The Vulkan renderer acquires and presents the SDL native
              * surface while servicing this framebuffer request. Android's
              * controller overlay is a separate View above the SDL surface.
+             *
+             * A request stalls the FIFO and render threads, so only make one
+             * when the guest may show a new picture (VBLANK, flip, capture)
+             * or for the keepalive, not on every 1 ms tick of this loop.
              */
-            (void)nv2a_get_framebuffer_surface();
-            nv2a_release_framebuffer_surface();
+            static uint32_t synced_seq;
+            static int64_t synced_ns;
+            uint32_t seq = nv2a_get_display_seq();
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            if (seq != synced_seq || now - synced_ns >= 100 * SCALE_MS) {
+                synced_seq = seq;
+                synced_ns = now;
+                (void)nv2a_get_framebuffer_surface();
+                nv2a_release_framebuffer_surface();
+            }
             qemu_mutex_lock_main_loop();
             bql_lock();
             sdl2_poll_events(&sdl2_console[0]);

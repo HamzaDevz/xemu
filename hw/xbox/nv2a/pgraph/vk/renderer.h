@@ -876,6 +876,11 @@ typedef struct PGRAPHVkDisplayState {
         size_t size;
         int width, height;
     } capture;
+
+    /* What the swapchain shows, to skip presenting an unchanged frame */
+    SurfaceBinding *presented_surface;
+    hwaddr presented_addr;
+    int64_t presented_ns;
 #endif
 
     VkImage blend_prev_image;

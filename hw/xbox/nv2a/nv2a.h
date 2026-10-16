@@ -46,5 +46,11 @@ void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
+/*
+ * Changes whenever the guest may show a new picture: on every VBLANK and CRTC
+ * start address write (a flip), and when a display capture is requested. The
+ * Android direct Vulkan display loop only syncs the display when it moves.
+ */
+uint32_t nv2a_get_display_seq(void);
 
 #endif
