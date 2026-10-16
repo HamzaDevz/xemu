@@ -30,6 +30,7 @@
 
 #include "xemu-settings.h"
 #include "hw/xbox/nv2a/debug.h"
+#include "xemu_lan.h"
 
 extern "C" void xemu_set_fp_safe(bool enable);
 extern "C" bool xemu_get_fp_safe(void);
@@ -737,6 +738,9 @@ struct DisplaySettings {
   bool hrtf = false;
   bool cache_shaders = true;
   bool net_enable = false;
+  // Loopback endpoints of the System Link relay; empty when it is not running.
+  std::string lan_bind;
+  std::string lan_remote;
   std::string renderer = "vulkan";
   std::string filtering = "nearest";
   std::string aspect_ratio = "fit";
@@ -835,8 +839,19 @@ static bool WriteConfigToml(const std::string& config_path,
 
   toml::table* net = EnsureTable(tbl, "net");
   if (net) {
-    net->insert_or_assign("enable", ds.net_enable);
-    net->insert_or_assign("backend", "nat");
+    if (!ds.lan_bind.empty()) {
+      // System Link: QEMU's UDP netdev talks to the xemu_lan relay.
+      net->insert_or_assign("enable", true);
+      net->insert_or_assign("backend", "udp");
+      toml::table* udp = EnsureTable(*net, "udp");
+      if (udp) {
+        udp->insert_or_assign("bind_addr", ds.lan_bind);
+        udp->insert_or_assign("remote_addr", ds.lan_remote);
+      }
+    } else {
+      net->insert_or_assign("enable", ds.net_enable);
+      net->insert_or_assign("backend", "nat");
+    }
   }
 
   sys->insert_or_assign("mem_limit", ds.mem_limit_mib == 128 ? "128" : "64");
@@ -862,6 +877,49 @@ static bool WriteConfigToml(const std::string& config_path,
   out << tbl;
   out.close();
   return true;
+}
+
+// A readable game name for System Link discovery replies, from a file path
+// or a SAF URI such as "content://.../primary%3AGames%2FHalo%20CE.iso".
+static std::string GameNameFromPath(const std::string& path) {
+  std::string decoded;
+  for (size_t i = 0; i < path.size(); i++) {
+    if (path[i] == '%' && i + 2 < path.size() &&
+        isxdigit(uint8_t(path[i + 1])) && isxdigit(uint8_t(path[i + 2]))) {
+      decoded += char(strtol(path.substr(i + 1, 2).c_str(), nullptr, 16));
+      i += 2;
+    } else {
+      decoded += path[i];
+    }
+  }
+  size_t sep = decoded.find_last_of("/:");
+  std::string name = sep == std::string::npos ? decoded : decoded.substr(sep + 1);
+  size_t dot = name.rfind('.');
+  if (dot != std::string::npos && dot > 0) name.resize(dot);
+  for (char& c : name) {
+    if (c == '\n' || c == '\r') c = ' ';  // newlines delimit the reply
+  }
+  return name;
+}
+
+static void StartSystemLink(JNIEnv* env, jobject activity,
+                            const std::string& game_path, DisplaySettings* ds) {
+  xemu_lan::Config lan;
+  lan.mode = xemu_lan::ParseMode(GetPrefString(env, activity, "setting_lan_mode"));
+  if (lan.mode == xemu_lan::Mode::Off) return;
+  lan.host_addr = GetPrefString(env, activity, "setting_lan_host");
+  char model[PROP_VALUE_MAX] = {};
+  __system_property_get("ro.product.model", model);
+  lan.name = model[0] ? model : "Android";
+  lan.game = GameNameFromPath(game_path);
+  if (xemu_lan::Start(lan, &ds->lan_bind, &ds->lan_remote)) {
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                        "System Link relay up (%s), QEMU %s -> %s",
+                        lan.mode == xemu_lan::Mode::Host ? "host" : "join",
+                        ds->lan_bind.c_str(), ds->lan_remote.c_str());
+  } else {
+    LogError("System Link relay failed to start; keeping the normal network setting");
+  }
 }
 
 static SetupFiles SyncSetupFiles() {
@@ -1055,6 +1113,7 @@ static SetupFiles SyncSetupFiles() {
                          GetPrefBool(env, activity, "hrtf", false));
   ds.cache_shaders = GetPrefBool(env, activity, "setting_cache_shaders", true);
   ds.net_enable = GetPrefBool(env, activity, "setting_network_enable", false);
+  StartSystemLink(env, activity, !dvdPath.empty() ? dvdPath : dvdUri, &ds);
   ds.mem_limit_mib = GetPrefInt(env, activity, "setting_system_memory_mib",
                                  GetPrefInt(env, activity, "sys_mem_mib", 64));
   ds.chihiro = GetPrefBool(env, activity, "setting_chihiro", false);
@@ -1802,6 +1861,16 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_izzy2lost_x1box_MainActivity_nativeGetFps(JNIEnv *, jobject)
 {
     return static_cast<jint>(g_nv2a_stats.increment_fps);
+}
+
+// Next System Link event for the UI as (event << 32) | arg, or 0 when none.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_izzy2lost_x1box_MainActivity_nativePollLanEvent(JNIEnv *, jobject)
+{
+    xemu_lan::Event event;
+    int arg = 0;
+    if (!xemu_lan::PollEvent(&event, &arg)) return 0;
+    return (static_cast<jlong>(event) << 32) | static_cast<uint32_t>(arg);
 }
 
 extern "C" JNIEXPORT jstring JNICALL

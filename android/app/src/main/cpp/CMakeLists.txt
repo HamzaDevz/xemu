@@ -1268,6 +1268,7 @@ add_dependencies(slirp_static glib_ep)
 
 add_library(xemu SHARED
   xemu_android.cpp
+  xemu_lan.cpp
   android_crash_handler.cpp
   vmstate_if_android.c
   xemu_fatx_import.c

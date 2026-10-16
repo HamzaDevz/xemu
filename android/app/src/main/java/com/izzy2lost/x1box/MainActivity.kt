@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.hardware.input.InputManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -55,6 +56,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     private const val TOTAL_SNAPSHOT_SLOTS = 10
     private const val TAG = "MainActivity"
     private const val EXIT_WATCHDOG_MS = 8000L
+    private const val LAN_EVENT_POLL_MS = 1000L
   }
 
   private enum class PendingCloseAction {
@@ -94,6 +96,19 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     override fun run() {
       fpsTextView?.text = "FPS: ${nativeGetFps()}"
       fpsHandler.postDelayed(this, fpsUpdateInterval)
+    }
+  }
+  private var lanMulticastLock: WifiManager.MulticastLock? = null
+  private var lanHostAddress = ""
+  private val lanEventRunnable = object : Runnable {
+    override fun run() {
+      while (true) {
+        val packed = nativePollLanEvent()
+        if (packed == 0L) break
+        SystemLink.eventMessage(this@MainActivity, (packed ushr 32).toInt(), packed.toInt(), lanHostAddress)
+          ?.let { Toast.makeText(this@MainActivity, it, Toast.LENGTH_LONG).show() }
+      }
+      fpsHandler.postDelayed(this, LAN_EVENT_POLL_MS)
     }
   }
 
@@ -162,6 +177,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     initializeSwipeMenuGesture()
     setupOnScreenController()
     setupFpsOverlay()
+    setupSystemLink()
     setupControllerDetection()
     hideSystemUI()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -324,6 +340,23 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
 
     // Check for existing controllers and show/hide accordingly
     updateControllerVisibility()
+  }
+
+  private fun setupSystemLink() {
+    val prefs = getSharedPreferences("x1box_prefs", MODE_PRIVATE)
+    val mode = prefs.getString(SystemLink.PREF_MODE, SystemLink.MODE_OFF)
+    if (mode != SystemLink.MODE_HOST && mode != SystemLink.MODE_JOIN) return
+    lanHostAddress = prefs.getString(SystemLink.PREF_HOST, "").orEmpty()
+    if (mode == SystemLink.MODE_HOST) {
+      // Wi-Fi drivers may filter broadcast frames to save power, and the
+      // "Find" probes from joining devices are broadcasts.
+      val wifi = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
+      lanMulticastLock = wifi?.createMulticastLock("x1box-system-link")?.apply {
+        setReferenceCounted(false)
+        runCatching { acquire() }
+      }
+    }
+    fpsHandler.postDelayed(lanEventRunnable, LAN_EVENT_POLL_MS)
   }
 
   private fun setupFpsOverlay() {
@@ -540,6 +573,9 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     DebugLog.i(TAG) { "onDestroy()" }
     pendingCloseAction = PendingCloseAction.NONE
     fpsHandler.removeCallbacks(fpsRunnable)
+    fpsHandler.removeCallbacks(lanEventRunnable)
+    lanMulticastLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+    lanMulticastLock = null
     swipeUpGestureRecognizer.reset()
     resumeEmulationOnMenuDismiss = false
     inGameMenuDialog?.dismiss()
@@ -639,6 +675,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   private external fun nativeLoadSnapshot(name: String): Boolean
   private external fun nativeRebootSystem()
   private external fun nativeGetFps(): Int
+  private external fun nativePollLanEvent(): Long
   private external fun nativeSetLightGun(x: Float, y: Float, down: Boolean)
   private external fun nativeSetControllerRemap(table: IntArray?)
   private external fun nativePauseEmulation()

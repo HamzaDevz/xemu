@@ -2,6 +2,7 @@ package com.izzy2lost.x1box
 
 import java.io.File
 import java.io.IOException
+import java.security.SecureRandom
 
 internal object XboxEepromEditor {
   private const val EEPROM_SIZE = 256
@@ -15,6 +16,10 @@ internal object XboxEepromEditor {
   private const val USER_CHECKSUM_LENGTH = 0x5C
 
   private const val XBOX_LIVE_DNS_OFFSET = 0xAC
+
+  // In the factory section, right after the 12-byte serial number.
+  private const val MAC_OFFSET = 0x40
+  private const val MAC_SIZE = 6
 
   private const val VIDEO_STANDARD_OFFSET = 0x58
   private const val LANGUAGE_OFFSET       = 0x90
@@ -218,6 +223,37 @@ internal object XboxEepromEditor {
     file.writeBytes(data)
     return true
   }
+
+  @Throws(IOException::class, IllegalArgumentException::class)
+  fun readMac(file: File): ByteArray {
+    val data = file.readBytes()
+    ensureValidSize(file, data)
+    return data.copyOfRange(MAC_OFFSET, MAC_OFFSET + MAC_SIZE)
+  }
+
+  /**
+   * Gives the console a fresh MAC address in Microsoft's 00:50:F2 range, the
+   * same way xemu generates new EEPROMs. Two consoles that share a MAC (an
+   * EEPROM copied between devices) cannot see each other over System Link.
+   */
+  @Throws(IOException::class, IllegalArgumentException::class)
+  fun randomizeMac(file: File): ByteArray {
+    val data = file.readBytes()
+    ensureValidSize(file, data)
+
+    val nic = ByteArray(3).also { SecureRandom().nextBytes(it) }
+    val mac = byteArrayOf(0x00, 0x50, 0xF2.toByte()) + nic
+    mac.copyInto(data, destinationOffset = MAC_OFFSET)
+
+    val factoryChecksum = xboxChecksum(data, FACTORY_CHECKSUM_START, FACTORY_CHECKSUM_LENGTH)
+    writeLeUInt32(data, FACTORY_CHECKSUM_OFFSET, factoryChecksum)
+
+    file.writeBytes(data)
+    return mac
+  }
+
+  fun formatMac(mac: ByteArray): String =
+    mac.joinToString(":") { "%02X".format(it.toInt() and 0xFF) }
 
   private fun ensureValidSize(file: File, data: ByteArray) {
     if (data.size != EEPROM_SIZE) {
