@@ -4,6 +4,7 @@
 #define CONFIG_ANDROID 1
 #define CONFIG_POSIX 1
 #define CONFIG_LINUX 1
+#define CONFIG_PTHREAD_SETNAME_NP_W_TID 1
 
 #define CONFIG_SDL 1
 #define CONFIG_SDL2 1

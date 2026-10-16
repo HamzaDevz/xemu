@@ -2138,6 +2138,10 @@ static void *call_qemu_main(void *opaque)
     int status;
 
     DPRINTF("Second thread: calling qemu_main()\n");
+#ifdef __ANDROID__
+    /* Every thread is otherwise "qemu_main" in top and simpleperf */
+    qemu_thread_naming(true);
+#endif
     qemu_init(gArgc, gArgv);
     status = qemu_main();
     DPRINTF("Second thread: qemu_main() returned, exiting\n");
