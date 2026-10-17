@@ -2034,7 +2034,16 @@ static void gen_enter_mmx(DisasContext *s)
     }
     s->mmx_entered = true;
 
-    GEN_HELPER_FALLBACK_v_v(enter_mmx, BISECT_GRP_STACK);
+    /*
+     * helper_enter_mmx() only sets fpstt to 0 and marks all eight tags
+     * valid, so emit that inline instead of a helper call per block.
+     */
+    if (!g_use_fp_jit || !HARD_FPU_HAS_TCG_FP_OPS || !BISECT_GRP_STACK) {
+        tcg_gen_movi_i32(fpstt, 0);
+        tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
+                       offsetof(CPUX86State, fptags));
+        return;
+    }
 
     gen_flush_fp((DisasContext *)tcg_ctx->disas_ctx);
 

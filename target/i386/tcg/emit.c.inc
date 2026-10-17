@@ -4867,6 +4867,39 @@ static void gen_VSHUF(DisasContext *s, X86DecodedInsn *decode)
 {
     TCGv_i32 imm = tcg_constant_i32(decode->immediate);
     SSEFunc_0_pppi ps, pd, fn;
+
+    /*
+     * The immediate is known here, so a 128-bit shuffle is just element
+     * moves: load every source element first, as d may alias v or w.
+     */
+    if (!s->vex_l) {
+        X86DecodedOp *d = &decode->op[0], *v = &decode->op[1];
+        X86DecodedOp *w = &decode->op[2];
+        int order = decode->immediate;
+
+        if (s->prefix & PREFIX_DATA) {
+            TCGv_i64 q0 = tcg_temp_new_i64(), q1 = tcg_temp_new_i64();
+            tcg_gen_ld_i64(q0, tcg_env,
+                           vector_elem_offset(v, MO_64, order & 1));
+            tcg_gen_ld_i64(q1, tcg_env,
+                           vector_elem_offset(w, MO_64, (order >> 1) & 1));
+            tcg_gen_st_i64(q0, tcg_env, vector_elem_offset(d, MO_64, 0));
+            tcg_gen_st_i64(q1, tcg_env, vector_elem_offset(d, MO_64, 1));
+        } else {
+            TCGv_i32 l[4];
+            for (int i = 0; i < 4; i++) {
+                l[i] = tcg_temp_new_i32();
+                tcg_gen_ld_i32(l[i], tcg_env,
+                               vector_elem_offset(i < 2 ? v : w, MO_32,
+                                                  (order >> (2 * i)) & 3));
+            }
+            for (int i = 0; i < 4; i++) {
+                tcg_gen_st_i32(l[i], tcg_env, vector_elem_offset(d, MO_32, i));
+            }
+        }
+        return;
+    }
+
     ps = s->vex_l ? gen_helper_shufps_ymm : gen_helper_shufps_xmm;
     pd = s->vex_l ? gen_helper_shufpd_ymm : gen_helper_shufpd_xmm;
     fn = s->prefix & PREFIX_DATA ? pd : ps;

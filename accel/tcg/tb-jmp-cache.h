@@ -30,9 +30,14 @@ typedef struct TBJumpCacheEntry {
 
 typedef struct CPUJumpCache {
     struct rcu_head rcu;
+    /*
+     * A lookup reads both ways of a set, so keep each set inside one cache
+     * line; the cache itself is allocated cache line aligned.
+     */
     struct {
         TBJumpCacheEntry ways[TB_JMP_CACHE_WAYS];
-    } array[TB_JMP_CACHE_SIZE];
+    } QEMU_ALIGNED(sizeof(TBJumpCacheEntry) * TB_JMP_CACHE_WAYS)
+        array[TB_JMP_CACHE_SIZE];
 } CPUJumpCache;
 
 #endif /* ACCEL_TCG_TB_JMP_CACHE_H */

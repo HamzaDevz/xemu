@@ -723,50 +723,122 @@ static void merge_exception_flags(CPUX86State *env, int old_flags)
  * x87-native.h). On by default; XEMU_TCG_NATIVE_X87=0, or on Android
  * `setprop debug.xemu.tcg.native_x87 0`, keeps every operation in softfloat.
  */
-static bool x87_native_enabled(void)
+static int x87_native_state = -1;
+
+static bool __attribute__((noinline, cold)) x87_native_init(void)
 {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 1;
+    int enabled = 1;
 #ifdef __ANDROID__
-        char value[PROP_VALUE_MAX] = {};
-        if (__system_property_get("debug.xemu.tcg.native_x87", value) > 0 &&
-            value[0] == '0') {
-            enabled = 0;
-        }
-#else
-        const char *env = getenv("XEMU_TCG_NATIVE_X87");
-        if (env && env[0] == '0') {
-            enabled = 0;
-        }
-#endif
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.xemu.tcg.native_x87", value) > 0 &&
+        value[0] == '0') {
+        enabled = 0;
     }
+#else
+    const char *env = getenv("XEMU_TCG_NATIVE_X87");
+    if (env && env[0] == '0') {
+        enabled = 0;
+    }
+#endif
+    x87_native_state = enabled;
     return enabled;
 }
 
-/* Precision control double (bits 9:8 = 10) and round-to-nearest (11:10 = 0) */
-#define X87N_FPUC_MASK 0x0f00
-#define X87N_FPUC_MODE 0x0200
+/* The property is read once, out of line, so the fast paths stay small */
+static inline bool x87_native_enabled(void)
+{
+    int state = x87_native_state;
+    return likely(state >= 0) ? state : x87_native_init();
+}
+
+/*
+ * Round-to-nearest (bits 11:10 = 0) with precision control double (9:8 = 10)
+ * or single (00)
+ */
+#define X87N_FPUC_MASK   0x0f00
+#define X87N_FPUC_DOUBLE 0x0200
+#define X87N_FPUC_SINGLE 0x0000
 
 static inline void x87_native_raise(CPUX86State *env, bool inexact)
 {
-    /* What merge_exception_flags() records for a lone inexact. */
+    /* What merge_exception_flags() records for a lone inexact, or none. */
     if (inexact) {
         float_raise(float_flag_inexact, &env->fp_status);
-        fpu_set_exception(env, FPUS_PE);
+    }
+    fpu_set_exception(env, inexact ? FPUS_PE : 0);
+}
+
+/* Significand bits a load is rounded to under the precision control */
+static inline int x87_native_prec_bits(CPUX86State *env)
+{
+    switch (get_floatx80_rounding_precision(&env->fp_status)) {
+    case floatx80_precision_s:
+        return 24;
+    case floatx80_precision_d:
+        return 53;
+    default:
+        return 64;
     }
 }
 
-/* r = a op b on the host FPU; false leaves it to softfloat. */
-static inline bool x87_native_binop(CPUX86State *env, int op, floatx80 a,
-                                    floatx80 b, floatx80 *r)
+/* An IEEE single or double loaded as an extended value; false: softfloat. */
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_load(CPUX86State *env, uint64_t f, int frac_bits, int bias,
+                floatx80 *r)
 {
+    floatx80 v;
+
+    if (!x87_native_enabled() ||
+        !x87n_from_ieee(f, frac_bits, bias, x87_native_prec_bits(env),
+                        &v.low, &v.high)) {
+        return false;
+    }
+    x87_native_raise(env, false);
+    *r = v;
+    return true;
+}
+
+/* An integer loaded as an extended value, at prec_bits; no flags. */
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_iload(int64_t val, int prec_bits, floatx80 *r)
+{
+    floatx80 v;
+
+    if (!x87_native_enabled() ||
+        !x87n_from_int64(val, prec_bits, &v.low, &v.high)) {
+        return false;
+    }
+    *r = v;
+    return true;
+}
+
+/* ST0 rounded by the rounding control to an IEEE single or double. */
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_store(CPUX86State *env, int frac_bits, int bias, uint64_t *out)
+{
+    int rc = (env->fpuc & FPU_RC_MASK) >> FPU_RC_SHIFT;
     bool inexact;
 
-    if ((env->fpuc & X87N_FPUC_MASK) != X87N_FPUC_MODE ||
+    if (!x87_native_enabled() ||
+        !x87n_to_ieee(ST0.low, ST0.high, rc, frac_bits, bias, out,
+                      &inexact)) {
+        return false;
+    }
+    x87_native_raise(env, inexact);
+    return true;
+}
+
+/* r = a op b on the host FPU; false leaves it to softfloat. */
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_binop(CPUX86State *env, int op, floatx80 a, floatx80 b, floatx80 *r)
+{
+    int mode = env->fpuc & X87N_FPUC_MASK;
+    bool inexact;
+
+    if ((mode != X87N_FPUC_DOUBLE && mode != X87N_FPUC_SINGLE) ||
         !x87_native_enabled() ||
-        !x87n_binop(op, a.low, a.high, b.low, b.high, &r->low, &r->high,
-                    &inexact)) {
+        !x87n_binop(op, mode == X87N_FPUC_SINGLE, a.low, a.high, b.low,
+                    b.high, &r->low, &r->high, &inexact)) {
         return false;
     }
     x87_native_raise(env, inexact);
@@ -774,13 +846,16 @@ static inline bool x87_native_binop(CPUX86State *env, int op, floatx80 a,
 }
 
 /* *r = sqrt(*r) on the host FPU; false leaves it to softfloat. */
-static inline bool x87_native_sqrt(CPUX86State *env, floatx80 *r)
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_sqrt(CPUX86State *env, floatx80 *r)
 {
+    int mode = env->fpuc & X87N_FPUC_MASK;
     bool inexact;
 
-    if ((env->fpuc & X87N_FPUC_MASK) != X87N_FPUC_MODE ||
+    if ((mode != X87N_FPUC_DOUBLE && mode != X87N_FPUC_SINGLE) ||
         !x87_native_enabled() ||
-        !x87n_sqrt(r->low, r->high, &r->low, &r->high, &inexact)) {
+        !x87n_sqrt(mode == X87N_FPUC_SINGLE, r->low, r->high, &r->low,
+                   &r->high, &inexact)) {
         return false;
     }
     x87_native_raise(env, inexact);
@@ -788,8 +863,8 @@ static inline bool x87_native_sqrt(CPUX86State *env, floatx80 *r)
 }
 
 /* a compared with b, as floatx80_compare(); no mode dependence, no flags. */
-static inline bool x87_native_compare(floatx80 a, floatx80 b,
-                                      FloatRelation *rel)
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_compare(floatx80 a, floatx80 b, FloatRelation *rel)
 {
     int r;
 
@@ -806,8 +881,9 @@ static inline bool x87_native_compare(floatx80 a, floatx80 b,
  * toward zero; anything else (out of range included) is left to softfloat,
  * which raises invalid.
  */
-static inline bool x87_native_fist(CPUX86State *env, bool chop, int64_t min,
-                                   int64_t max, int64_t *val)
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_fist(CPUX86State *env, bool chop, int64_t min, int64_t max,
+                int64_t *val)
 {
     int rc = chop ? X87N_RC_CHOP : (env->fpuc & FPU_RC_MASK) >> FPU_RC_SHIFT;
     bool inexact;
@@ -826,11 +902,23 @@ static inline bool x87_native_fist(CPUX86State *env, bool chop, int64_t min,
 #define X87_NATIVE_COMPARE(a, b, rel) x87_native_compare(a, b, rel)
 #define X87_NATIVE_FIST(chop, min, max, val) \
     x87_native_fist(env, chop, min, max, val)
+#define X87_NATIVE_LOAD32(f, r)       x87_native_load(env, f, 23, 127, r)
+#define X87_NATIVE_LOAD64(f, r)       x87_native_load(env, f, 52, 1023, r)
+#define X87_NATIVE_ILOAD(val, prec, r) x87_native_iload(val, prec, r)
+#define X87_NATIVE_PREC_BITS()        x87_native_prec_bits(env)
+#define X87_NATIVE_STORE32(out)       x87_native_store(env, 23, 127, out)
+#define X87_NATIVE_STORE64(out)       x87_native_store(env, 52, 1023, out)
 #else
 #define X87_NATIVE_BINOP(op, a, b, r) false
 #define X87_NATIVE_SQRT(r)            false
 #define X87_NATIVE_COMPARE(a, b, rel) false
 #define X87_NATIVE_FIST(chop, min, max, val) ((void)(val), false)
+#define X87_NATIVE_LOAD32(f, r)       false
+#define X87_NATIVE_LOAD64(f, r)       false
+#define X87_NATIVE_ILOAD(val, prec, r) false
+#define X87_NATIVE_PREC_BITS()        64
+#define X87_NATIVE_STORE32(out)       ((void)(out), false)
+#define X87_NATIVE_STORE64(out)       ((void)(out), false)
 #endif
 
 #if USE_NATIVE_DOUBLE_STORAGE
@@ -869,6 +957,9 @@ static void fpu_raise_exception(CPUX86State *env, uintptr_t retaddr)
 
 void helper_flds_FT0(CPUX86State *env, uint32_t val)
 {
+    if (X87_NATIVE_LOAD32(val, &FT0)) {
+        return;
+    }
     int old_flags = save_exception_flags(env);
     union {
         float32 f;
@@ -882,6 +973,9 @@ void helper_flds_FT0(CPUX86State *env, uint32_t val)
 
 void helper_fldl_FT0(CPUX86State *env, uint64_t val)
 {
+    if (X87_NATIVE_LOAD64(val, &FT0)) {
+        return;
+    }
     int old_flags = save_exception_flags(env);
     union {
         float64 f;
@@ -895,12 +989,15 @@ void helper_fldl_FT0(CPUX86State *env, uint64_t val)
 
 void helper_fildl_FT0(CPUX86State *env, int32_t val)
 {
+    if (X87_NATIVE_ILOAD(val, X87_NATIVE_PREC_BITS(), &FT0)) {
+        return;
+    }
     FT0 = int32_to_floatx80(val, &env->fp_status);
 }
 
 void helper_flds_ST0(CPUX86State *env, uint32_t val)
 {
-    int old_flags = save_exception_flags(env);
+    int old_flags;
     int new_fpstt;
     union {
         float32 f;
@@ -908,6 +1005,12 @@ void helper_flds_ST0(CPUX86State *env, uint32_t val)
     } u;
 
     new_fpstt = (env->fpstt - 1) & 7;
+    if (X87_NATIVE_LOAD32(val, &FPREG_VAL(env->fpregs[new_fpstt]))) {
+        env->fpstt = new_fpstt;
+        env->fptags[new_fpstt] = 0; /* validate stack entry */
+        return;
+    }
+    old_flags = save_exception_flags(env);
     u.i = val;
     FPREG_VAL(env->fpregs[new_fpstt]) = float32_to_floatx80(u.f, &env->fp_status);
     env->fpstt = new_fpstt;
@@ -917,7 +1020,7 @@ void helper_flds_ST0(CPUX86State *env, uint32_t val)
 
 void helper_fldl_ST0(CPUX86State *env, uint64_t val)
 {
-    int old_flags = save_exception_flags(env);
+    int old_flags;
     int new_fpstt;
     union {
         float64 f;
@@ -925,6 +1028,12 @@ void helper_fldl_ST0(CPUX86State *env, uint64_t val)
     } u;
 
     new_fpstt = (env->fpstt - 1) & 7;
+    if (X87_NATIVE_LOAD64(val, &FPREG_VAL(env->fpregs[new_fpstt]))) {
+        env->fpstt = new_fpstt;
+        env->fptags[new_fpstt] = 0; /* validate stack entry */
+        return;
+    }
+    old_flags = save_exception_flags(env);
     u.i = val;
     FPREG_VAL(env->fpregs[new_fpstt]) = float64_to_floatx80(u.f, &env->fp_status);
     env->fpstt = new_fpstt;
@@ -942,9 +1051,15 @@ static FloatX80RoundPrec tmp_maximise_precision(float_status *st)
 void helper_fildl_ST0(CPUX86State *env, int32_t val)
 {
     int new_fpstt;
-    FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
 
     new_fpstt = (env->fpstt - 1) & 7;
+    if (X87_NATIVE_ILOAD(val, 64, &FPREG_VAL(env->fpregs[new_fpstt]))) {
+        env->fpstt = new_fpstt;
+        env->fptags[new_fpstt] = 0; /* validate stack entry */
+        return;
+    }
+
+    FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
     FPREG_VAL(env->fpregs[new_fpstt]) = int32_to_floatx80(val, &env->fp_status);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
@@ -955,9 +1070,15 @@ void helper_fildl_ST0(CPUX86State *env, int32_t val)
 void helper_fildll_ST0(CPUX86State *env, int64_t val)
 {
     int new_fpstt;
-    FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
 
     new_fpstt = (env->fpstt - 1) & 7;
+    if (X87_NATIVE_ILOAD(val, 64, &FPREG_VAL(env->fpregs[new_fpstt]))) {
+        env->fpstt = new_fpstt;
+        env->fptags[new_fpstt] = 0; /* validate stack entry */
+        return;
+    }
+
+    FloatX80RoundPrec old = tmp_maximise_precision(&env->fp_status);
     FPREG_VAL(env->fpregs[new_fpstt]) = int64_to_floatx80(val, &env->fp_status);
     env->fpstt = new_fpstt;
     env->fptags[new_fpstt] = 0; /* validate stack entry */
@@ -967,6 +1088,10 @@ void helper_fildll_ST0(CPUX86State *env, int64_t val)
 
 uint32_t helper_fsts_ST0(CPUX86State *env)
 {
+    uint64_t fast;
+    if (X87_NATIVE_STORE32(&fast)) {
+        return fast;
+    }
     int old_flags = save_exception_flags(env);
     union {
         float32 f;
@@ -980,6 +1105,10 @@ uint32_t helper_fsts_ST0(CPUX86State *env)
 
 uint64_t helper_fstl_ST0(CPUX86State *env)
 {
+    uint64_t fast;
+    if (X87_NATIVE_STORE64(&fast)) {
+        return fast;
+    }
     int old_flags = save_exception_flags(env);
     union {
         float64 f;

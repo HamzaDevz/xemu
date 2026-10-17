@@ -34,6 +34,7 @@
 #include "tcg/tcg.h"
 #include "qemu/atomic.h"
 #include "qemu/rcu.h"
+#include "qemu/memalign.h"
 #include "exec/log.h"
 #include "qemu/main-loop.h"
 #include "exec/icount.h"
@@ -502,6 +503,36 @@ static inline bool tb_jmp_cache_entry_matches(const TBJumpCacheEntry *entry,
            tb->flags == s.flags && tb_cflags(tb) == s.cflags;
 }
 
+/*
+ * Probe both ways of @s.pc's jump cache set.  The way is picked by pc with a
+ * select rather than a branch: which way holds a given target is close to
+ * random, and the mispredicted branch cost more than the rest of the probe.
+ * The other way only matters when both hold the same pc under other flags.
+ */
+static inline QEMU_ALWAYS_INLINE TranslationBlock *
+tb_jmp_cache_lookup(CPUState *cpu, TCGTBCPUState s)
+{
+    const TBJumpCacheEntry *ways =
+        cpu->tb_jmp_cache->array[tb_jmp_cache_hash_func(s.pc)].ways;
+    TranslationBlock *tb0 = qatomic_read(&ways[0].tb);
+    TranslationBlock *tb1 = qatomic_read(&ways[1].tb);
+    uintptr_t hit0 = -(uintptr_t)(ways[0].pc == s.pc);
+    uintptr_t hit1 = -(uintptr_t)(ways[1].pc == s.pc) & ~hit0;
+    TranslationBlock *tb;
+
+    /* Masks, not a conditional, which the compiler turns back into a branch */
+    tb = (TranslationBlock *)(((uintptr_t)tb0 & hit0) |
+                              ((uintptr_t)tb1 & hit1));
+    if (likely(tb && tb->cs_base == s.cs_base && tb->flags == s.flags &&
+               tb_cflags(tb) == s.cflags)) {
+        return tb;
+    }
+    if (tb != tb1 && tb_jmp_cache_entry_matches(&ways[1], tb1, s)) {
+        return tb1;
+    }
+    return NULL;
+}
+
 static inline void tb_jmp_cache_insert(CPUJumpCache *jc, uint32_t hash,
                                        vaddr pc, TranslationBlock *tb)
 {
@@ -548,27 +579,13 @@ TranslationBlock *inv_tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
 static inline QEMU_ALWAYS_INLINE TranslationBlock *
 tb_lookup(CPUState *cpu, TCGTBCPUState s)
 {
-    TranslationBlock *tb, *tb0, *tb1;
-    CPUJumpCache *jc;
-    TBJumpCacheEntry *ways;
-    uint32_t hash;
+    TranslationBlock *tb;
 
     /* we should never be trying to look up an INVALID tb */
     tcg_debug_assert(!(s.cflags & CF_INVALID));
 
-    hash = tb_jmp_cache_hash_func(s.pc);
-    jc = cpu->tb_jmp_cache;
-    ways = jc->array[hash].ways;
-
-    tb0 = qatomic_read(&ways[0].tb);
-    if (likely(tb_jmp_cache_entry_matches(&ways[0], tb0, s))) {
-        tb = tb0;
-        goto hit;
-    }
-
-    tb1 = qatomic_read(&ways[1].tb);
-    if (tb_jmp_cache_entry_matches(&ways[1], tb1, s)) {
-        tb = tb1;
+    tb = tb_jmp_cache_lookup(cpu, s);
+    if (likely(tb)) {
         goto hit;
     }
 
@@ -577,7 +594,8 @@ tb_lookup(CPUState *cpu, TCGTBCPUState s)
         return NULL;
     }
 
-    tb_jmp_cache_insert(jc, hash, s.pc, tb);
+    tb_jmp_cache_insert(cpu->tb_jmp_cache, tb_jmp_cache_hash_func(s.pc),
+                        s.pc, tb);
 
 hit:
     /*
@@ -744,18 +762,49 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
  * skipped.  The front end is responsible for only using this where that
  * really holds; see gen_eob() in target/i386.
  */
-const void *HELPER(lookup_tb_ptr_i32)(CPUArchState *env, uint32_t eip,
-                                      uint64_t cs_base, uint32_t flags)
+static const void * __attribute__((noinline))
+lookup_tb_ptr_i32_slow(CPUState *cpu, vaddr pc, uint64_t cs_base,
+                       uint32_t flags, uint32_t cflags)
 {
-    CPUState *cpu = env_cpu(env);
     TCGTBCPUState s = {
-        .pc = (uint32_t)(cs_base + eip),
+        .pc = pc,
         .flags = flags,
-        .cflags = curr_cflags(cpu),
+        .cflags = cflags,
         .cs_base = cs_base,
     };
 
     return lookup_tb_ptr_common(cpu, s);
+}
+
+const void *HELPER(lookup_tb_ptr_i32)(CPUArchState *env, uint32_t eip,
+                                      uint64_t cs_base, uint32_t flags)
+{
+    CPUState *cpu = env_cpu(env);
+    vaddr pc = (uint32_t)(cs_base + eip);
+    uint32_t cflags = curr_cflags(cpu);
+
+    /*
+     * Most block ends land here, so a jump cache hit with no breakpoint or
+     * exec logging to honour is handled without a frame; anything else goes
+     * the common way, out of line.
+     */
+    if (likely(QTAILQ_EMPTY(&cpu->breakpoints) &&
+               !qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC))) {
+        TCGTBCPUState s = {
+            .pc = pc,
+            .flags = flags,
+            .cflags = cflags,
+            .cs_base = cs_base,
+        };
+        TranslationBlock *tb = tb_jmp_cache_lookup(cpu, s);
+
+        if (likely(tb)) {
+            assert((tb_cflags(tb) & CF_PCREL) || tb->pc == pc);
+            cpu->neg.can_do_io = true;
+            return tb->tc.ptr;
+        }
+    }
+    return lookup_tb_ptr_i32_slow(cpu, pc, cs_base, flags, cflags);
 }
 
 /* Return the current PC from CPU, which may be cached in TB. */
@@ -1489,7 +1538,8 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
         tcg_target_initialized = true;
     }
 
-    cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+    cpu->tb_jmp_cache = qemu_memalign(64, sizeof(CPUJumpCache));
+    memset(cpu->tb_jmp_cache, 0, sizeof(CPUJumpCache));
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);
@@ -1497,6 +1547,11 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
     /* qemu_plugin_vcpu_init_hook delayed until cpu_index assigned. */
 
     return true;
+}
+
+static void tb_jmp_cache_free(CPUJumpCache *jc)
+{
+    qemu_vfree(jc);
 }
 
 /* undo the initializations in reverse order */
@@ -1507,5 +1562,5 @@ void tcg_exec_unrealizefn(CPUState *cpu)
 #endif /* !CONFIG_USER_ONLY */
 
     tlb_destroy(cpu);
-    g_free_rcu(cpu->tb_jmp_cache, rcu);
+    call_rcu(cpu->tb_jmp_cache, tb_jmp_cache_free, rcu);
 }
