@@ -228,6 +228,14 @@ typedef struct DisasContext {
     bool cc_op_dirty;
 #ifdef XBOX
     bool xbox_idle; /* this STI opens the kernel idle loop */
+    /* Memory polling loop detection, see xbox_poll_insn() */
+    bool poll_ok;
+    bool poll_flags;        /* flags written so far */
+    uint16_t poll_read;     /* registers read before being written */
+    uint16_t poll_written;
+    MemOp poll_ot;
+    TCGv poll_addr;         /* the loop's only load, NULL until seen */
+    TCGv poll_val;
 #endif
 
     /*
@@ -4636,6 +4644,13 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
+#ifdef XBOX
+    dc->poll_ok = dc->jmp_opt && !(cflags & (CF_USE_ICOUNT | CF_SINGLE_STEP));
+    dc->poll_flags = false;
+    dc->poll_read = 0;
+    dc->poll_written = 0;
+    dc->poll_addr = NULL;
+#endif
 
     dc->T0 = tcg_temp_new();
     dc->T1 = tcg_temp_new();

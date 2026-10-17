@@ -2526,6 +2526,78 @@ illegal:
  * Convert one instruction. s->base.is_jmp is set if the translation must
  * be stopped.
  */
+#ifdef XBOX
+/*
+ * Games wait for the GPU, the APU or another thread with loops like
+ *
+ *     top:  mov ecx, [edx]
+ *           mov edi, esi
+ *           sub edi, ecx
+ *           cmp eax, edi
+ *           jb top
+ *
+ * that is a TB branching back to its own start, with one load and no store,
+ * writing no register it reads before writing it: every iteration computes
+ * the same thing until that memory changes.  gen_Jcc() then waits for a store
+ * to it in helper_xbox_poll() on the back edge instead of spinning.
+ */
+static void xbox_poll_insn(DisasContext *s, X86DecodedInsn *decode)
+{
+    X86GenFunc gen = decode->e.gen;
+    bool alu = gen == gen_ADD || gen == gen_SUB || gen == gen_AND ||
+               gen == gen_OR || gen == gen_XOR;
+    bool load = false;
+    uint16_t read = 0, written = 0;
+
+    if (!s->poll_ok || gen == gen_Jcc) {
+        return;
+    }
+    if ((!alu && gen != gen_MOV && gen != gen_LEA) ||
+        (s->prefix & PREFIX_LOCK)) {
+        goto fail;
+    }
+    for (int i = 0; i < 3; i++) {
+        X86DecodedOp *op = &decode->op[i];
+
+        if (op->has_ea) {
+            if (decode->mem.base >= 0) {
+                read |= 1 << decode->mem.base;
+            }
+            if (decode->mem.index >= 0) {
+                read |= 1 << decode->mem.index;
+            }
+        }
+        if (op->unit == X86_OP_SKIP || op->unit == X86_OP_IMM) {
+            continue;
+        }
+        if (op->unit != X86_OP_INT || (i == 0 && op->has_ea)) {
+            goto fail;
+        }
+        if (op->has_ea) {
+            load = true;
+        } else {
+            int n = op->ot == MO_8 && byte_reg_is_xH(s, op->n) ? op->n - 4
+                                                                : op->n;
+            if (i == 0) {
+                written |= 1 << n;
+            } else {
+                read |= 1 << n;
+            }
+        }
+    }
+    if (load && s->poll_addr) {
+        goto fail;
+    }
+    s->poll_read |= read & ~s->poll_written;
+    s->poll_written |= written;
+    s->poll_flags |= alu;
+    return;
+
+fail:
+    s->poll_ok = false;
+}
+#endif
+
 static void disas_insn(DisasContext *s, CPUState *cpu)
 {
     CPUX86State *env = cpu_env(cpu);
@@ -2847,6 +2919,7 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
 
 #ifdef XBOX
     s->xbox_idle = decode.e.gen == gen_STI && xbox_idle_follows(env, s);
+    xbox_poll_insn(s, &decode);
 #endif
 
     if (decode.e.special == X86_SPECIAL_MMX &&
@@ -2870,6 +2943,18 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         }
         gen_load(s, &decode, 1, s->T0);
         gen_load(s, &decode, 2, s->T1);
+#ifdef XBOX
+        /* Keep the load, should this TB be a polling loop */
+        for (int n = 1; s->poll_ok && n <= 2; n++) {
+            if (decode.op[n].unit == X86_OP_INT && decode.op[n].has_ea) {
+                s->poll_ot = decode.op[n].ot;
+                s->poll_addr = tcg_temp_new();
+                s->poll_val = tcg_temp_new();
+                tcg_gen_mov_tl(s->poll_addr, s->A0);
+                tcg_gen_mov_tl(s->poll_val, n == 1 ? s->T0 : s->T1);
+            }
+        }
+#endif
         decode.e.gen(s, &decode);
         gen_writeback(s, &decode, 0, s->T0);
     }

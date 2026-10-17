@@ -2394,6 +2394,19 @@ static void gen_Jcc(DisasContext *s, X86DecodedInsn *decode)
 
     gen_bnd_jmp(s);
     gen_jcc(s, decode->b & 0xf, taken);
+#ifdef XBOX
+    if (s->poll_ok && s->poll_addr && s->poll_flags &&
+        !(s->poll_read & s->poll_written) &&
+        s->pc + decode->immediate == s->base.pc_first) {
+        /* a polling loop, see xbox_poll_insn() */
+        gen_jmp_rel_csize(s, 0, 1);
+        gen_set_label(taken);
+        gen_helper_xbox_poll(tcg_env, s->poll_addr, s->poll_val,
+                             tcg_constant_i32(s->poll_ot | s->mem_index << 4));
+        gen_jmp_rel(s, s->dflag, decode->immediate, 0);
+        return;
+    }
+#endif
     gen_conditional_jump_labels(s, decode->immediate, NULL, taken);
 }
 

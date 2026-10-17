@@ -47,6 +47,9 @@
 #include "tb-context.h"
 #include "tb-internal.h"
 #include "internal-common.h"
+#if defined(XBOX) && defined(CONFIG_LINUX)
+#include "qemu/futex.h"
+#endif
 #include "tb-cache-hints.h"
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -1123,6 +1126,16 @@ void tcg_kick_vcpu_thread(CPUState *cpu)
 
     /* Ensure cpu_exec will see the exit request after TCG has exited.  */
     qatomic_store_release(&cpu->neg.icount_decr.u16.high, -1);
+#if defined(XBOX) && defined(__aarch64__)
+    /* End the WFE of helper_xbox_poll() */
+    asm volatile("dsb ishst\n\tsev" : : : "memory");
+#endif
+#if defined(XBOX) && defined(CONFIG_LINUX)
+    /* or its sleep */
+    if (qatomic_xchg(&cpu->poll_sleep, 0)) {
+        qemu_futex_wake_all(&cpu->poll_sleep);
+    }
+#endif
 }
 
 static inline bool icount_exit_request(CPUState *cpu)

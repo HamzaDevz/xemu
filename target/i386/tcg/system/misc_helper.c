@@ -25,6 +25,11 @@
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "exec/cputlb.h"
+#include "accel/tcg/probe.h"
+#include "qemu/timer.h"
+#ifdef CONFIG_LINUX
+#include "qemu/futex.h"
+#endif
 #include "tcg/helper-tcg.h"
 #include "hw/i386/apic.h"
 
@@ -533,6 +538,78 @@ void helper_xbox_idle(CPUX86State *env)
         cpu_ldl_data_ra(env, next_thread, ra) == 0) {
         helper_hlt(env);
     }
+}
+
+/* Taken back edge of a memory polling loop, see xbox_poll_insn() */
+void helper_xbox_poll(CPUX86State *env, target_ulong addr, target_ulong val,
+                      uint32_t oi)
+{
+#ifdef __aarch64__
+    CPUState *cs = env_cpu(env);
+    MemOp ot = oi & MO_SIZE;
+    uint32_t cur;
+    void *host;
+
+    if (ot > MO_32 || (addr & ((1 << ot) - 1))) {
+        return;
+    }
+    host = tlb_vaddr_to_host(env, addr, MMU_DATA_LOAD, oi >> 4);
+    if (!host) {
+        return;
+    }
+#ifdef CONFIG_LINUX
+    /*
+     * A wait of the same loop that lasts beyond spin_ns sleeps instead, in
+     * slices of sleep_ns: the thread then idles its core for the governor too.
+     * A kick ends the sleep at once, a store only at the end of the slice.
+     * On the Odin 3 this saved 0.75 W over WFE alone, with fewer slow frames.
+     */
+    const int64_t spin_ns = 200 * SCALE_US, sleep_ns = 200 * SCALE_US;
+    static __thread target_ulong wait_addr;
+    static __thread int64_t wait_start, wait_last;
+    int64_t now = get_clock();
+
+    if (addr != wait_addr || now - wait_last > sleep_ns + SCALE_MS) {
+        wait_addr = addr;
+        wait_start = now;
+    }
+    wait_last = now;
+#endif
+    /*
+     * Arm the exclusive monitor on the location: a store to it from another
+     * thread ends the WFE, as do a kick (tcg_kick_vcpu_thread() sends an
+     * event) and the kernel's event stream.
+     */
+    switch (ot) {
+    case MO_8:
+        asm volatile("ldxrb %w0, [%1]" : "=r"(cur) : "r"(host) : "memory");
+        break;
+    case MO_16:
+        asm volatile("ldxrh %w0, [%1]" : "=r"(cur) : "r"(host) : "memory");
+        break;
+    default:
+        asm volatile("ldxr %w0, [%1]" : "=r"(cur) : "r"(host) : "memory");
+        break;
+    }
+    if (cur != (uint32_t)(val & MAKE_64BIT_MASK(0, 8 << ot)) ||
+        (int32_t)qatomic_read(&cs->neg.icount_decr.u32) < 0) {
+        return;
+    }
+#ifdef CONFIG_LINUX
+    if (now - wait_start >= spin_ns) {
+        struct timespec ts = { .tv_nsec = sleep_ns };
+
+        qatomic_set(&cs->poll_sleep, 1);
+        smp_mb();
+        if ((int32_t)qatomic_read(&cs->neg.icount_decr.u32) >= 0) {
+            qemu_futex(&cs->poll_sleep, FUTEX_WAIT, 1, &ts, NULL, 0);
+        }
+        qatomic_set(&cs->poll_sleep, 0);
+        return;
+    }
+#endif
+    asm volatile("wfe" : : : "memory");
+#endif
 }
 #endif
 

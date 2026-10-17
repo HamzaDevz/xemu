@@ -540,6 +540,9 @@ struct CPUState {
     bool unplug;
     bool crash_occurred;
     bool exit_request;
+#ifdef XBOX
+    uint32_t poll_sleep; /* futex, 1 while helper_xbox_poll() sleeps */
+#endif
     int exclusive_context_count;
     uint32_t cflags_next_tb;
     uint32_t interrupt_request;
