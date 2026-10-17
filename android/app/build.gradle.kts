@@ -120,6 +120,12 @@ android {
       if (hasReleaseKeystore) {
         signingConfig = signingConfigs.getByName("release")
       }
+      // The shipped .so files are stripped (see androidComponents below); the
+      // symbol table goes into the AAB's BUNDLE-METADATA instead, so Play
+      // Console can symbolize native crashes. It is never delivered to phones.
+      ndk {
+        debugSymbolLevel = "SYMBOL_TABLE"
+      }
     }
     create("profile") {
       initWith(getByName("release"))
@@ -153,7 +159,6 @@ android {
     )
     /* Extract .so to disk (nativeLibraryDir); required for adrenotools hooks / custom GPU drivers. */
     jniLibs.useLegacyPackaging = true
-    jniLibs.keepDebugSymbols += setOf("**/*.so")
   }
 
   compileOptions {
@@ -176,5 +181,16 @@ dependencies {
 kotlin {
   compilerOptions {
     jvmTarget.set(JvmTarget.JVM_21)
+  }
+}
+
+androidComponents {
+  onVariants { variant ->
+    /* Unstripped .so files cost no runtime speed (symbols are never loaded),
+       only download and install size. Keep them where simpleperf needs
+       function names -- the profile variant, and debug -- and strip release. */
+    if (variant.buildType != "release") {
+      variant.packaging.jniLibs.keepDebugSymbols.add("**/*.so")
+    }
   }
 }
