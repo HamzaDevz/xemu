@@ -22,6 +22,9 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "qemu/main-loop.h"
 #include "ui/xemu-settings.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 void nv2a_update_irq(NV2AState *d)
 {
@@ -232,9 +235,14 @@ uint64_t nv2a_get_display_generation(void)
 static int64_t nv2a_calc_vblank_period_ns(NV2AState *d)
 {
     uint32_t vdisplay = d->pramdac.fp_vdisplay_end;
+    uint32_t hdisplay = d->pramdac.fp_hdisplay_end;
 
-    if (vdisplay > 480) {
-        /* PAL (576i/576p): ~50 Hz */
+    /*
+     * PAL (576i/576p, at most 720 pixels wide): ~50 Hz. 720p and 1080i are
+     * taller than 480 lines too, but they run at 60 Hz: a title that picks
+     * them would otherwise be held to 50 fps.
+     */
+    if (vdisplay > 480 && vdisplay < 600 && hdisplay < 768) {
         return NANOSECONDS_PER_SECOND / 50;
     }
 
@@ -389,6 +397,13 @@ void nv2a_vblank_recalc(NV2AState *d)
 {
     if (d->vblank_timer) {
         int64_t period = nv2a_calc_vblank_period_ns(d);
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_INFO, "xemu-mode",
+                            "display %ux%u, VBLANK %.2f Hz",
+                            d->pramdac.fp_hdisplay_end,
+                            d->pramdac.fp_vdisplay_end,
+                            1e9 / (double)period);
+#endif
         d->vblank_next_target_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + period;
         timer_mod(d->vblank_timer, d->vblank_next_target_ns);
     }
