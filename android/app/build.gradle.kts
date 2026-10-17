@@ -138,7 +138,13 @@ android {
       matchingFallbacks += listOf("release")
       externalNativeBuild {
         cmake {
-          arguments += listOf("-DXEMU_ENABLE_LTO=ON")
+          // Debuggable variants build the CMake Debug config: give it the
+          // release flags, hidden visibility lets ThinLTO inline across files
+          arguments += listOf(
+            "-DXEMU_ENABLE_LTO=ON",
+            "-DCMAKE_C_FLAGS_DEBUG=-O2 -g0 -fvisibility=hidden",
+            "-DCMAKE_CXX_FLAGS_DEBUG=-O2 -g0 -fvisibility=hidden",
+          )
         }
       }
       ndk {
