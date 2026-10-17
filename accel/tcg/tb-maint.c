@@ -45,6 +45,7 @@
 #include "system/runstate.h"
 #endif
 #include "trace.h"
+#include "tcg/xbox-fastmem.h"
 
 /* List iterators for lists of tagged pointers in TranslationBlock. */
 #define TB_FOR_EACH_TAGGED(head, tb, n, field)                          \
@@ -797,6 +798,7 @@ void tb_flush__exclusive_or_serial(void)
     tb_remove_all();
 
     tcg_region_reset_all();
+    xbox_fastmem_code_flushed();
     /* XXX: flush processor icache at this point if cache flush is expensive */
     qatomic_inc(&tb_ctx.tb_flush_count);
 

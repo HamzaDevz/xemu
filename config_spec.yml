@@ -414,6 +414,9 @@ chihiro:
       type: enum
       values: [auto, type1, type3]
       default: auto
+    widescreen:
+      type: bool
+      default: false
   link:
     enable: bool
     cabinets:

@@ -52,6 +52,7 @@
 #endif
 #include "tcg/tcg-ldst.h"
 #include "backend-ldst.h"
+#include "tcg/xbox-fastmem.h"
 
 
 /* DEBUG defines, enable DEBUG_TLB_LOG to log to the CPU_LOG_MMU target */
@@ -294,6 +295,9 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
     CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
     CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
 
+    if (mmu_idx == XBOX_FASTMEM_MMU_IDX) {
+        xbox_fastmem_unmap_all();
+    }
     tlb_mmu_resize_locked(desc, fast, now);
     tlb_mmu_flush_locked(desc, fast);
 }
@@ -514,6 +518,9 @@ static void tlb_flush_page_locked(CPUState *cpu, int midx, vaddr page)
                   midx, lp_addr, lp_mask);
         tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
     } else {
+        if (midx == XBOX_FASTMEM_MMU_IDX) {
+            xbox_fastmem_unmap_range(page, TARGET_PAGE_SIZE);
+        }
         if (tlb_flush_entry_locked(tlb_entry(cpu, midx, page), page)) {
             tlb_n_used_entries_dec(cpu, midx);
         }
@@ -700,6 +707,18 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
                   midx, d->large_page_addr, d->large_page_mask);
         tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
         return;
+    }
+
+    if (midx == XBOX_FASTMEM_MMU_IDX) {
+        /*
+         * The window is indexed by the full 32-bit address; a narrower
+         * mask makes the range alias other addresses, so drop it all.
+         */
+        if (bits < 32) {
+            xbox_fastmem_unmap_all();
+        } else {
+            xbox_fastmem_unmap_range(addr, len);
+        }
     }
 
     for (vaddr i = 0; i < len; i += TARGET_PAGE_SIZE) {
@@ -922,6 +941,10 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
     int mmu_idx;
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+#if XBOX_FASTMEM_SUPPORTED
+    /* Writable window pages in the range go back to read-only. */
+    xbox_fastmem_reset_dirty(start, length);
+#endif
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
@@ -1212,7 +1235,50 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     tlb_n_used_entries_inc(cpu, mmu_idx);
     desc->ever_used = true;
     qemu_spin_unlock(&tlb->c.lock);
+#if XBOX_FASTMEM_SUPPORTED
+    xbox_fastmem_tick();
+#endif
 }
+
+#if XBOX_FASTMEM_SUPPORTED
+/*
+ * For the fastmem fault handler: look @page up in the main TLB of
+ * @mmu_idx for a load or a store.  Returns 1 with the host address of the
+ * page when the entry is plain RAM (no flags at all), 0 on a miss, -1 when
+ * the only flag is TLB_NOTDIRTY (dirty tracking armed), and -2 for any
+ * other flag.  Call under xbox_fastmem_tlb_lock().
+ */
+int xbox_fastmem_tlb_probe(CPUState *cpu, int mmu_idx, uint64_t page,
+                           bool is_write, uintptr_t *host);
+int xbox_fastmem_tlb_probe(CPUState *cpu, int mmu_idx, uint64_t page,
+                           bool is_write, uintptr_t *host)
+{
+    CPUTLBEntry *te = tlb_entry(cpu, mmu_idx, page);
+    uint64_t cmp = tlb_read_idx(te, is_write ? MMU_DATA_STORE
+                                             : MMU_DATA_LOAD);
+
+    if ((cmp & TARGET_PAGE_MASK) != page) {
+        return 0;
+    }
+    if (cmp != page) {
+        return (cmp & ~TARGET_PAGE_MASK) == TLB_NOTDIRTY ? -1 : -2;
+    }
+    *host = (uintptr_t)(te->addend + page);
+    return 1;
+}
+
+void xbox_fastmem_tlb_lock(CPUState *cpu);
+void xbox_fastmem_tlb_lock(CPUState *cpu)
+{
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+}
+
+void xbox_fastmem_tlb_unlock(CPUState *cpu);
+void xbox_fastmem_tlb_unlock(CPUState *cpu)
+{
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+#endif
 
 void tlb_set_page_with_attrs(CPUState *cpu, vaddr addr,
                              hwaddr paddr, MemTxAttrs attrs, int prot,

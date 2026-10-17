@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.hardware.input.InputManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -28,6 +29,7 @@ import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -53,6 +55,8 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     private const val SNAPSHOT_PREVIEW_HEADER_SIZE = 12
     private const val TOTAL_SNAPSHOT_SLOTS = 10
     private const val TAG = "MainActivity"
+    private const val EXIT_WATCHDOG_MS = 8000L
+    private const val LAN_EVENT_POLL_MS = 1000L
   }
 
   private enum class PendingCloseAction {
@@ -70,6 +74,8 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
 
   private var onScreenController: OnScreenController? = null
   private var controllerBridge: ControllerInputBridge? = null
+  private lateinit var controllerSettings: ControllerSettings
+  private var touchLayoutToolbar: View? = null
   private var isControllerVisible = false
   private var inputManager: InputManager? = null
   private var hasPhysicalController = false
@@ -90,6 +96,19 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     override fun run() {
       fpsTextView?.text = "FPS: ${nativeGetFps()}"
       fpsHandler.postDelayed(this, fpsUpdateInterval)
+    }
+  }
+  private var lanMulticastLock: WifiManager.MulticastLock? = null
+  private var lanHostAddress = ""
+  private val lanEventRunnable = object : Runnable {
+    override fun run() {
+      while (true) {
+        val packed = nativePollLanEvent()
+        if (packed == 0L) break
+        SystemLink.eventMessage(this@MainActivity, (packed ushr 32).toInt(), packed.toInt(), lanHostAddress)
+          ?.let { Toast.makeText(this@MainActivity, it, Toast.LENGTH_LONG).show() }
+      }
+      fpsHandler.postDelayed(this, LAN_EVENT_POLL_MS)
     }
   }
 
@@ -158,6 +177,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     initializeSwipeMenuGesture()
     setupOnScreenController()
     setupFpsOverlay()
+    setupSystemLink()
     setupControllerDetection()
     hideSystemUI()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -185,6 +205,10 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   }
 
   private fun handleBackNavigation() {
+    if (isEditingTouchLayout()) {
+      finishTouchLayoutEditor()
+      return
+    }
     val currentDialog = inGameMenuDialog
     if (currentDialog?.isShowing == true) {
       currentDialog.dismiss()
@@ -216,7 +240,9 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     if (event.keyCode == KeyEvent.KEYCODE_BACK && !isGamepadKeyEvent(event)) {
       if (event.action == KeyEvent.ACTION_UP && event.repeatCount == 0) {
         val currentDialog = inGameMenuDialog
-        if (currentDialog?.isShowing == true) {
+        if (isEditingTouchLayout()) {
+          finishTouchLayoutEditor()
+        } else if (currentDialog?.isShowing == true) {
           currentDialog.dismiss()
         } else {
           showInGameMenu()
@@ -282,13 +308,18 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   }
 
   private fun setupOnScreenController() {
+    controllerSettings = ControllerSettings(this)
     // Create on-screen controller
     onScreenController = OnScreenController(this).apply {
       layoutParams = FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT,
         FrameLayout.LayoutParams.MATCH_PARENT
       )
+      alpha = controllerSettings.controllerOpacity
+      setLayout(controllerSettings.touchLayout)
+      onLayoutEdited = { controllerSettings.touchLayout = it }
     }
+    applyControllerRemap(ControllerRemap.load(this))
 
     // Create input bridge
     controllerBridge = ControllerInputBridge()
@@ -309,6 +340,23 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
 
     // Check for existing controllers and show/hide accordingly
     updateControllerVisibility()
+  }
+
+  private fun setupSystemLink() {
+    val prefs = getSharedPreferences("x1box_prefs", MODE_PRIVATE)
+    val mode = prefs.getString(SystemLink.PREF_MODE, SystemLink.MODE_OFF)
+    if (mode != SystemLink.MODE_HOST && mode != SystemLink.MODE_JOIN) return
+    lanHostAddress = prefs.getString(SystemLink.PREF_HOST, "").orEmpty()
+    if (mode == SystemLink.MODE_HOST) {
+      // Wi-Fi drivers may filter broadcast frames to save power, and the
+      // "Find" probes from joining devices are broadcasts.
+      val wifi = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
+      lanMulticastLock = wifi?.createMulticastLock("x1box-system-link")?.apply {
+        setReferenceCounted(false)
+        runCatching { acquire() }
+      }
+    }
+    fpsHandler.postDelayed(lanEventRunnable, LAN_EVENT_POLL_MS)
   }
 
   private fun setupFpsOverlay() {
@@ -496,7 +544,9 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     if (shouldShow != isControllerVisible) {
       isControllerVisible = shouldShow
       swipeUpGestureRecognizer.reset()
-      onScreenController?.visibility = if (shouldShow) View.VISIBLE else View.GONE
+      if (!isEditingTouchLayout()) {
+        onScreenController?.visibility = if (shouldShow) View.VISIBLE else View.GONE
+      }
     }
   }
 
@@ -523,6 +573,9 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     DebugLog.i(TAG) { "onDestroy()" }
     pendingCloseAction = PendingCloseAction.NONE
     fpsHandler.removeCallbacks(fpsRunnable)
+    fpsHandler.removeCallbacks(lanEventRunnable)
+    lanMulticastLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+    lanMulticastLock = null
     swipeUpGestureRecognizer.reset()
     resumeEmulationOnMenuDismiss = false
     inGameMenuDialog?.dismiss()
@@ -622,7 +675,9 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   private external fun nativeLoadSnapshot(name: String): Boolean
   private external fun nativeRebootSystem()
   private external fun nativeGetFps(): Int
+  private external fun nativePollLanEvent(): Long
   private external fun nativeSetLightGun(x: Float, y: Float, down: Boolean)
+  private external fun nativeSetControllerRemap(table: IntArray?)
   private external fun nativePauseEmulation()
   private external fun nativeResumeEmulation()
   private external fun nativeSetReturnToLibraryOnExit(enable: Boolean)
@@ -925,7 +980,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
 
   private fun showInGameMenu() {
     swipeUpGestureRecognizer.reset()
-    if (inGameMenuDialog?.isShowing == true) {
+    if (inGameMenuDialog?.isShowing == true || isEditingTouchLayout()) {
       return
     }
     nativePauseEmulation()
@@ -960,43 +1015,29 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
       }
     }
 
-    fun addSingleButton(parent: LinearLayout, spec: MenuButtonSpec) {
-      parent.addView(createMenuButton(spec).apply {
-        layoutParams = LinearLayout.LayoutParams(
-          LinearLayout.LayoutParams.MATCH_PARENT,
-          LinearLayout.LayoutParams.WRAP_CONTENT
-        ).also { lp ->
-          lp.bottomMargin = verticalButtonSpacing
-        }
-      })
-    }
-
-    fun addButtonRow(parent: LinearLayout, left: MenuButtonSpec, right: MenuButtonSpec) {
+    fun addButtonRow(parent: LinearLayout, vararg specs: MenuButtonSpec) {
       parent.addView(
         LinearLayout(this).apply {
           orientation = LinearLayout.HORIZONTAL
+          // Keep buttons top-aligned when one label wraps to two lines.
+          isBaselineAligned = false
           layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
           ).also { lp ->
             lp.bottomMargin = verticalButtonSpacing
           }
-          addView(createMenuButton(left).apply {
-            layoutParams = LinearLayout.LayoutParams(
-              0,
-              LinearLayout.LayoutParams.WRAP_CONTENT,
-              1f
-            ).also { lp ->
-              lp.marginEnd = horizontalButtonSpacing
-            }
-          })
-          addView(createMenuButton(right).apply {
-            layoutParams = LinearLayout.LayoutParams(
-              0,
-              LinearLayout.LayoutParams.WRAP_CONTENT,
-              1f
-            )
-          })
+          specs.forEachIndexed { index, spec ->
+            addView(createMenuButton(spec).apply {
+              layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+              ).also { lp ->
+                if (index < specs.lastIndex) lp.marginEnd = horizontalButtonSpacing
+              }
+            })
+          }
         }
       )
     }
@@ -1010,6 +1051,25 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
       }
     ) {
       toggleOnScreenController()
+    }
+    val remapButton = MenuButtonSpec(
+      getString(R.string.in_game_menu_remap_controller),
+      resumeAfterDismiss = false
+    ) {
+      ControllerRemap.showEditor(
+        this,
+        onChanged = ::applyControllerRemap,
+        onDismiss = {
+          hideSystemUI()
+          resumeEmulationIfSafe()
+        },
+      )
+    }
+    val editTouchLayoutButton = MenuButtonSpec(
+      getString(R.string.in_game_menu_edit_touch_layout),
+      resumeAfterDismiss = false
+    ) {
+      startTouchLayoutEditor()
     }
     val saveStateButton = MenuButtonSpec(
       getString(R.string.in_game_menu_save_state),
@@ -1045,11 +1105,10 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     val buttonList = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       setPadding((20 * dp).toInt(), (12 * dp).toInt(), (20 * dp).toInt(), 0)
-      addSingleButton(this, resumeButton)
-      addSingleButton(this, touchControlsButton)
+      addButtonRow(this, resumeButton, touchControlsButton)
+      addButtonRow(this, remapButton, editTouchLayoutButton)
       addButtonRow(this, saveStateButton, loadStateButton)
-      addSingleButton(this, rebootButton)
-      addButtonRow(this, exitToLibraryButton, quitAppButton)
+      addButtonRow(this, rebootButton, exitToLibraryButton, quitAppButton)
     }
 
     val scrollContainer = NestedScrollView(this).apply {
@@ -1081,8 +1140,117 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     dialog.show()
   }
 
+  private fun applyControllerRemap(map: Map<ControllerRemap.XboxInput, ControllerRemap.Source>) {
+    runCatching { nativeSetControllerRemap(ControllerRemap.toNativeTable(map)) }
+      .onFailure { DebugLog.e(TAG, it) { "Failed to apply controller remap: ${it.message}" } }
+  }
+
+  private fun isEditingTouchLayout(): Boolean = touchLayoutToolbar != null
+
+  /**
+   * Layout editor: the game stays paused (the menu was dismissed without
+   * resuming) while the overlay is dragged around, and resumes on Done.
+   */
+  private fun startTouchLayoutEditor() {
+    val controller = onScreenController ?: return
+    val host = mLayout ?: return
+    controller.visibility = View.VISIBLE
+    controller.editMode = true
+
+    val dp = resources.displayMetrics.density
+    fun toolbarButton(label: String, onClick: () -> Unit) = MaterialButton(this).apply {
+      text = label
+      isAllCaps = false
+      minWidth = 0
+      minimumWidth = 0
+      setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
+      setOnClickListener { onClick() }
+      layoutParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).also { it.marginEnd = (6 * dp).toInt() }
+    }
+
+    val opacitySteps = floatArrayOf(1.0f, 0.85f, 0.7f, 0.55f, 0.4f, 0.25f)
+    fun opacityLabel() = getString(
+      R.string.touch_layout_opacity,
+      (controller.alpha * 100).roundToInt()
+    )
+
+    val smaller = toolbarButton(getString(R.string.touch_layout_smaller)) { controller.scaleSelected(1f / 1.1f) }
+    val larger = toolbarButton(getString(R.string.touch_layout_larger)) { controller.scaleSelected(1.1f) }
+    val hide = toolbarButton(getString(R.string.touch_layout_hide)) { controller.toggleSelectedVisibility() }
+    lateinit var opacity: MaterialButton
+    opacity = toolbarButton(opacityLabel()) {
+      val i = opacitySteps.indexOfFirst { kotlin.math.abs(it - controller.alpha) < 0.01f }
+      controller.alpha = opacitySteps[(i + 1) % opacitySteps.size]
+      controllerSettings.controllerOpacity = controller.alpha
+      opacity.text = opacityLabel()
+    }
+    val reset = toolbarButton(getString(R.string.touch_layout_reset)) {
+      MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_Xemu_RoundedDialog)
+        .setMessage(R.string.touch_layout_reset_message)
+        .setPositiveButton(R.string.touch_layout_reset) { _, _ ->
+          controller.resetLayout()
+          controller.alpha = 1f
+          controllerSettings.controllerOpacity = 1f
+          opacity.text = opacityLabel()
+        }
+        .setNegativeButton(android.R.string.cancel, null)
+        .setOnDismissListener { hideSystemUI() }
+        .show()
+    }
+    val done = toolbarButton(getString(R.string.touch_layout_done)) { finishTouchLayoutEditor() }
+
+    fun updateSelectionButtons(element: OnScreenController.Element?) {
+      val hasSelection = element != null
+      smaller.isEnabled = hasSelection
+      larger.isEnabled = hasSelection
+      hide.isEnabled = hasSelection
+      hide.text = getString(
+        if (controller.isSelectedVisible()) R.string.touch_layout_hide else R.string.touch_layout_show
+      )
+    }
+    controller.onSelectionChanged = ::updateSelectionButtons
+    updateSelectionButtons(null)
+
+    val row = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      setPadding((8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt())
+      setBackgroundColor(Color.argb(200, 20, 20, 20))
+      listOf(smaller, larger, hide, opacity, reset, done).forEach(::addView)
+    }
+    val toolbar = HorizontalScrollView(this).apply {
+      isHorizontalScrollBarEnabled = false
+      addView(row)
+    }
+    val params = RelativeLayout.LayoutParams(
+      RelativeLayout.LayoutParams.WRAP_CONTENT,
+      RelativeLayout.LayoutParams.WRAP_CONTENT
+    ).apply {
+      addRule(RelativeLayout.ALIGN_PARENT_TOP)
+      addRule(RelativeLayout.CENTER_HORIZONTAL)
+      topMargin = (8 * dp).toInt()
+    }
+    host.addView(toolbar, params)
+    touchLayoutToolbar = toolbar
+  }
+
+  private fun finishTouchLayoutEditor() {
+    val toolbar = touchLayoutToolbar ?: return
+    (toolbar.parent as? ViewGroup)?.removeView(toolbar)
+    touchLayoutToolbar = null
+    onScreenController?.apply {
+      onSelectionChanged = null
+      editMode = false
+      visibility = if (isControllerVisible) View.VISIBLE else View.GONE
+    }
+    hideSystemUI()
+    resumeEmulationIfSafe()
+  }
+
   private fun shouldHandleActivitySwipeMenu(): Boolean {
-    return !isControllerVisible && inGameMenuDialog?.isShowing != true
+    return !isControllerVisible && inGameMenuDialog?.isShowing != true && !isEditingTouchLayout()
   }
 
   private fun currentGestureHostHeight(): Float {
@@ -1121,7 +1289,17 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     nativeExitEmulation()
     if (action == PendingCloseAction.QUIT_APP) {
       moveTaskToBack(true)
+    } else {
+      // The library joins this task, so drop the game screen from the back
+      // stack; otherwise Back/B from the library returns to a dead emulator.
+      finish()
     }
+    // Native teardown ends with _exit(). If shutdown ever wedges instead,
+    // don't leave a black, unresponsive emulator behind: kill the process.
+    Handler(Looper.getMainLooper()).postDelayed({
+      android.util.Log.w(TAG, "Emulator did not exit after close request; killing process")
+      android.os.Process.killProcess(android.os.Process.myPid())
+    }, EXIT_WATCHDOG_MS)
   }
 
   override fun getLibraries(): Array<String> = arrayOf(

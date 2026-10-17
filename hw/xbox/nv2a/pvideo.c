@@ -54,6 +54,7 @@ void pvideo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     NV2AState *d = opaque;
 
     nv2a_reg_log_write(NV_PVIDEO, addr, size, val);
+    qatomic_set(&d->pvideo.write_seq, d->pvideo.write_seq + 1);
 
     switch (addr) {
     case NV_PVIDEO_BUFFER:

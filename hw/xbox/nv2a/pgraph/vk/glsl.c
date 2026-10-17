@@ -246,7 +246,9 @@ GByteArray *pgraph_vk_compile_glsl_to_spv(glslang_stage_t stage,
     }
 
     glslang_spv_options_t spv_options = {
-        .validate = true,
+        /* The validator makes every first-time compile slower; glslang's
+         * output is only worth checking while debugging shaders. */
+        .validate = g_config.display.vulkan.debug_shaders,
     };
 
     if (g_config.display.vulkan.debug_shaders) {

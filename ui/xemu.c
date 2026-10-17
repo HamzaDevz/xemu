@@ -65,6 +65,7 @@
 
 #ifdef __ANDROID__
 #include <android/log.h>
+#include <sys/system_properties.h>
 #include <SDL3/SDL_vulkan.h>
 #endif
 #ifdef _WIN32
@@ -164,6 +165,42 @@ static bool g_android_direct_vulkan = false;
 bool xemu_android_vulkan_direct_present_enabled(void)
 {
     return g_android_direct_vulkan;
+}
+
+/*
+ * Each direct-Vulkan display request stops the FIFO and render threads, so
+ * only make one when the guest may show a new picture (VBLANK, flip,
+ * capture) or for the keepalive, not on every 1 ms tick of the display loop;
+ * the renderer then skips presenting a frame already on screen.
+ * `setprop debug.xemu.vk.present_gate 0` requests on every pass, as before.
+ */
+static bool android_vk_present_needed(void)
+{
+    static int enabled = -1;
+    static uint32_t synced_seq;
+    static int64_t synced_ns;
+
+    if (enabled < 0) {
+        char value[PROP_VALUE_MAX] = {};
+        enabled = !(__system_property_get("debug.xemu.vk.present_gate",
+                                          value) > 0 &&
+                    value[0] == '0');
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "vulkan present gate: %s",
+                            enabled ? "on" : "off");
+    }
+    if (!enabled) {
+        return true;
+    }
+
+    uint32_t seq = nv2a_get_display_seq();
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (seq == synced_seq && now - synced_ns < 100 * SCALE_MS) {
+        return false;
+    }
+    synced_seq = seq;
+    synced_ns = now;
+    return true;
 }
 
 bool xemu_android_vulkan_create_surface(VkInstance instance,
@@ -1574,18 +1611,8 @@ void xemu_android_display_loop(void)
              * The Vulkan renderer acquires and presents the SDL native
              * surface while servicing this framebuffer request. Android's
              * controller overlay is a separate View above the SDL surface.
-             *
-             * A request stalls the FIFO and render threads, so only make one
-             * when the guest may show a new picture (VBLANK, flip, capture)
-             * or for the keepalive, not on every 1 ms tick of this loop.
              */
-            static uint32_t synced_seq;
-            static int64_t synced_ns;
-            uint32_t seq = nv2a_get_display_seq();
-            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-            if (seq != synced_seq || now - synced_ns >= 100 * SCALE_MS) {
-                synced_seq = seq;
-                synced_ns = now;
+            if (android_vk_present_needed()) {
                 (void)nv2a_get_framebuffer_surface();
                 nv2a_release_framebuffer_surface();
             }

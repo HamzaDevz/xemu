@@ -346,6 +346,7 @@ struct config {
             CONFIG_CHIHIRO_SETTINGS_REGION region;
             CONFIG_CHIHIRO_SETTINGS_DIMM_SIZE dimm_size;
             CONFIG_CHIHIRO_SETTINGS_BOARD_TYPE board_type;
+            bool widescreen;
         } settings;
         struct link {
             bool enable;

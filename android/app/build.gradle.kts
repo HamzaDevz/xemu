@@ -63,8 +63,8 @@ android {
     minSdk = 29
     targetSdk = 36
 
-    versionCode = 30
-    versionName = "1.2.9"
+    versionCode = 31
+    versionName = "1.3.0"
 
     ndk {
       abiFilters += listOf("arm64-v8a")
@@ -121,6 +121,12 @@ android {
       )
       if (hasReleaseKeystore) {
         signingConfig = signingConfigs.getByName("release")
+      }
+      // The shipped .so files are stripped (see androidComponents below); the
+      // symbol table goes into the AAB's BUNDLE-METADATA instead, so Play
+      // Console can symbolize native crashes. It is never delivered to phones.
+      ndk {
+        debugSymbolLevel = "SYMBOL_TABLE"
       }
     }
     /*
@@ -183,7 +189,6 @@ android {
     )
     /* Extract .so to disk (nativeLibraryDir); required for adrenotools hooks / custom GPU drivers. */
     jniLibs.useLegacyPackaging = true
-    jniLibs.keepDebugSymbols += setOf("**/*.so")
   }
 
   compileOptions {
@@ -198,6 +203,7 @@ dependencies {
   implementation("androidx.appcompat:appcompat:1.7.0")
   implementation("androidx.constraintlayout:constraintlayout:2.1.4")
   implementation("androidx.documentfile:documentfile:1.0.1")
+  implementation("androidx.recyclerview:recyclerview:1.3.2")
   implementation("io.coil-kt:coil:2.7.0")
   implementation("com.google.android.material:material:1.12.0")
 }
@@ -205,5 +211,16 @@ dependencies {
 kotlin {
   compilerOptions {
     jvmTarget.set(JvmTarget.JVM_21)
+  }
+}
+
+androidComponents {
+  onVariants { variant ->
+    /* Unstripped .so files cost no runtime speed (symbols are never loaded),
+       only download and install size. Keep them where simpleperf needs
+       function names -- the profile variant, and debug -- and strip release. */
+    if (variant.buildType != "release") {
+      variant.packaging.jniLibs.keepDebugSymbols.add("**/*.so")
+    }
   }
 }

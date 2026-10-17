@@ -14,11 +14,13 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
 import androidx.documentfile.provider.DocumentFile
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import java.io.BufferedOutputStream
 import java.io.BufferedInputStream
@@ -200,12 +202,18 @@ class SettingsActivity : AppCompatActivity() {
   private lateinit var gpuNotSupportedText: TextView
   private lateinit var btnInstallDriver: MaterialButton
   private lateinit var switchChihiro: MaterialSwitch
+  private lateinit var switchChihiroWidescreen: MaterialSwitch
   private lateinit var tvChihiroMbRomStatus: TextView
   private lateinit var btnPickChihiroMbRom: MaterialButton
   private lateinit var btnPickChihiroFolder: MaterialButton
   private lateinit var btnSelectDriver: MaterialButton
   private lateinit var btnResetDriver: MaterialButton
   private lateinit var tvInsigniaStatus: TextView
+  private lateinit var toggleLanMode: MaterialButtonToggleGroup
+  private lateinit var layoutLanJoin: LinearLayout
+  private lateinit var inputLanHost: TextInputLayout
+  private lateinit var editLanHost: TextInputEditText
+  private lateinit var tvLanStatus: TextView
   private lateinit var tvEepromStatus: TextView
   private lateinit var tvHddToolsStatus: TextView
   private lateinit var btnToggleAdvancedExperimental: MaterialButton
@@ -371,6 +379,11 @@ class SettingsActivity : AppCompatActivity() {
     val btnInitializeRetailHdd = findViewById<MaterialButton>(R.id.btn_initialize_retail_hdd)
     switchNetworkEnable  = findViewById(R.id.switch_network_enable)
     tvInsigniaStatus     = findViewById(R.id.tv_insignia_status)
+    toggleLanMode        = findViewById(R.id.toggle_lan_mode)
+    layoutLanJoin        = findViewById(R.id.layout_lan_join)
+    inputLanHost         = findViewById(R.id.input_lan_host)
+    editLanHost          = findViewById(R.id.edit_lan_host)
+    tvLanStatus          = findViewById(R.id.tv_lan_status)
     btnToggleAdvancedExperimental = findViewById(R.id.btn_toggle_advanced_experimental)
     btnInsigniaGuide     = findViewById(R.id.btn_insignia_guide)
     btnInsigniaSignUp    = findViewById(R.id.btn_insignia_sign_up)
@@ -384,6 +397,7 @@ class SettingsActivity : AppCompatActivity() {
     gpuNotSupportedText   = findViewById(R.id.settings_gpu_not_supported)
     btnInstallDriver      = findViewById(R.id.btn_install_driver)
     switchChihiro         = findViewById(R.id.switch_chihiro)
+    switchChihiroWidescreen = findViewById(R.id.switch_chihiro_widescreen)
     val toggleChihiroControls =
       findViewById<MaterialButtonToggleGroup>(R.id.toggle_chihiro_controls)
     tvChihiroMbRomStatus  = findViewById(R.id.settings_chihiro_mbrom_status)
@@ -505,6 +519,7 @@ class SettingsActivity : AppCompatActivity() {
     switchNetworkEnable.isChecked =
       prefs.getBoolean("setting_network_enable", false)
     switchChihiro.isChecked = prefs.getBoolean("setting_chihiro", false)
+    switchChihiroWidescreen.isChecked = prefs.getBoolean("setting_chihiro_widescreen", false)
     when (prefs.getString("setting_chihiro_controls", "gun")) {
       "driving" -> toggleChihiroControls.check(R.id.btn_chihiro_driving)
       else      -> toggleChihiroControls.check(R.id.btn_chihiro_gun)
@@ -524,6 +539,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     setupEepromEditor()
+    setupSystemLink()
     refreshInsigniaStatus()
     refreshHddToolsPreview(btnInitializeRetailHdd)
     setAdvancedExperimentalExpanded(
@@ -604,7 +620,10 @@ class SettingsActivity : AppCompatActivity() {
         .putBoolean("show_fps", switchShowFps.isChecked)
         .putBoolean(DebugLog.PREF_ENABLED, enableDebugLogs)
         .putBoolean("setting_network_enable", switchNetworkEnable.isChecked)
+        .putString(SystemLink.PREF_MODE, selectedLanMode())
+        .putString(SystemLink.PREF_HOST, editLanHost.text?.toString()?.trim().orEmpty())
         .putBoolean("setting_chihiro", switchChihiro.isChecked)
+        .putBoolean("setting_chihiro_widescreen", switchChihiroWidescreen.isChecked)
         .putString("setting_chihiro_controls",
                    if (toggleChihiroControls.checkedButtonId == R.id.btn_chihiro_driving)
                      "driving" else "gun")
@@ -662,6 +681,11 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     btnSave.setOnClickListener {
+      if (selectedLanMode() == SystemLink.MODE_JOIN && editLanHost.text.isNullOrBlank()) {
+        inputLanHost.error = getString(R.string.settings_lan_join_needs_host)
+        inputLanHost.requestFocus()
+        return@setOnClickListener
+      }
       try {
         val toastResult = persistSettings()
         Toast.makeText(this, toastResult.first, toastResult.second).show()
@@ -1224,6 +1248,8 @@ class SettingsActivity : AppCompatActivity() {
       ?.lowercase(Locale.US)
       ?.takeIf { it == "gun" || it == "driving" }
       ?.let { editor.putString("setting_chihiro_controls", it) }
+    parseTomlBoolean(sections, "chihiro.settings", "widescreen")
+      ?.let { editor.putBoolean("setting_chihiro_widescreen", it) }
     parseTomlBoolean(sections, "sys", "chihiro")
       ?.let {
         editor.putBoolean("setting_chihiro", it)
@@ -1396,6 +1422,117 @@ class SettingsActivity : AppCompatActivity() {
     } catch (_: Exception) {
       Toast.makeText(this, getString(R.string.library_about_open_failed), Toast.LENGTH_SHORT).show()
     }
+  }
+
+  private fun setupSystemLink() {
+    when (prefs.getString(SystemLink.PREF_MODE, SystemLink.MODE_OFF)) {
+      SystemLink.MODE_HOST -> toggleLanMode.check(R.id.btn_lan_host)
+      SystemLink.MODE_JOIN -> toggleLanMode.check(R.id.btn_lan_join)
+      else                 -> toggleLanMode.check(R.id.btn_lan_off)
+    }
+    editLanHost.setText(prefs.getString(SystemLink.PREF_HOST, "").orEmpty())
+    toggleLanMode.addOnButtonCheckedListener { _, _, isChecked ->
+      if (isChecked) refreshSystemLinkStatus()
+    }
+    editLanHost.doAfterTextChanged { inputLanHost.error = null }
+    findViewById<MaterialButton>(R.id.btn_lan_find_hosts).setOnClickListener { findSystemLinkHosts() }
+    findViewById<MaterialButton>(R.id.btn_lan_randomize_mac).setOnClickListener {
+      confirmRandomizeMac()
+    }
+    refreshSystemLinkStatus()
+  }
+
+  private fun selectedLanMode(): String = when (toggleLanMode.checkedButtonId) {
+    R.id.btn_lan_host -> SystemLink.MODE_HOST
+    R.id.btn_lan_join -> SystemLink.MODE_JOIN
+    else              -> SystemLink.MODE_OFF
+  }
+
+  private fun currentMacLabel(): String {
+    val eeprom = resolveEepromFile()
+    return runCatching { XboxEepromEditor.formatMac(XboxEepromEditor.readMac(eeprom)) }
+      .getOrElse { getString(R.string.settings_lan_mac_unknown) }
+  }
+
+  private fun refreshSystemLinkStatus() {
+    val mode = selectedLanMode()
+    layoutLanJoin.visibility = if (mode == SystemLink.MODE_JOIN) View.VISIBLE else View.GONE
+    tvLanStatus.text = when (mode) {
+      SystemLink.MODE_HOST -> {
+        val addresses = SystemLink.localAddresses()
+        if (addresses.isEmpty()) {
+          getString(R.string.settings_lan_status_host_no_ip, currentMacLabel())
+        } else {
+          getString(R.string.settings_lan_status_host, addresses.joinToString(", "), currentMacLabel())
+        }
+      }
+      SystemLink.MODE_JOIN -> getString(R.string.settings_lan_status_join, currentMacLabel())
+      else -> getString(R.string.settings_lan_status_off)
+    }
+  }
+
+  private fun findSystemLinkHosts() {
+    val searching = MaterialAlertDialogBuilder(this)
+      .setTitle(R.string.settings_lan_find_title)
+      .setMessage(R.string.settings_lan_find_searching)
+      .setNegativeButton(android.R.string.cancel, null)
+      .show()
+    Thread {
+      val hosts = runCatching { SystemLink.discover() }.getOrDefault(emptyList())
+      runOnUiThread {
+        if (isFinishing || isDestroyed || !searching.isShowing) return@runOnUiThread
+        searching.dismiss()
+        if (hosts.isEmpty()) {
+          MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.settings_lan_find_title)
+            .setMessage(R.string.settings_lan_find_none)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+          return@runOnUiThread
+        }
+        val labels = hosts.map { host ->
+          val consoles = resources.getQuantityString(
+            R.plurals.settings_lan_find_consoles, host.consoles, host.consoles)
+          val title = listOf(host.name, host.game).filter { it.isNotBlank() }.joinToString(" · ")
+          getString(R.string.settings_lan_find_entry, title.ifBlank { host.address }, consoles,
+                    host.joinAddress)
+        }
+        MaterialAlertDialogBuilder(this)
+          .setTitle(R.string.settings_lan_find_title)
+          .setItems(labels.toTypedArray()) { _, which ->
+            editLanHost.setText(hosts[which].joinAddress)
+          }
+          .setNegativeButton(android.R.string.cancel, null)
+          .show()
+      }
+    }.start()
+  }
+
+  private fun confirmRandomizeMac() {
+    val eeprom = resolveEepromFile()
+    if (!eeprom.isFile) {
+      Toast.makeText(this, R.string.settings_lan_randomize_mac_no_eeprom, Toast.LENGTH_LONG).show()
+      return
+    }
+    MaterialAlertDialogBuilder(this)
+      .setTitle(R.string.settings_lan_randomize_mac_title)
+      .setMessage(getString(R.string.settings_lan_randomize_mac_message, currentMacLabel()))
+      .setPositiveButton(R.string.settings_lan_randomize_mac) { _, _ ->
+        runCatching { XboxEepromEditor.randomizeMac(eeprom) }
+          .onSuccess { mac ->
+            Toast.makeText(
+              this,
+              getString(R.string.settings_lan_randomize_mac_done, XboxEepromEditor.formatMac(mac)),
+              Toast.LENGTH_LONG,
+            ).show()
+          }
+          .onFailure { error ->
+            Toast.makeText(this, error.message ?: error.javaClass.simpleName, Toast.LENGTH_LONG).show()
+          }
+        refreshSystemLinkStatus()
+      }
+      .setNegativeButton(android.R.string.cancel, null)
+      .show()
   }
 
   private fun refreshInsigniaStatus() {

@@ -57,6 +57,10 @@
 #include "hw/xbox/mcpx/apu/apu.h"
 
 #include "hw/xbox/xbox.h"
+#include "migration/vmstate.h"
+#include "system/tcg.h"
+#include "tcg/xbox-fastmem.h"
+#include <sys/syscall.h>
 #include "smbus.h"
 #include "chihiro/chihiro.h"
 #include "chihiro/chihiro-fatx-builder.h"
@@ -189,6 +193,39 @@ static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
 
     g_free(bios_data); /* duplicated by `rom_add_blob_fixed` */
 }
+/*
+ * Back guest RAM with a memfd so the TCG fastmem window can mirror guest
+ * pages into host address space (accel/tcg/xbox-fastmem.c).  Returns
+ * false to fall back to ordinary anonymous RAM.
+ */
+static bool xbox_init_fastmem_ram(MemoryRegion *ram, uint64_t size)
+{
+#if XBOX_FASTMEM_SUPPORTED
+    Error *err = NULL;
+    int fd;
+
+    if (!tcg_enabled() || !xbox_fastmem_window_base()) {
+        return false;
+    }
+    fd = syscall(__NR_memfd_create, "xbox.ram", 1 /* MFD_CLOEXEC */);
+    if (fd < 0) {
+        return false;
+    }
+    if (ftruncate(fd, size) ||
+        !memory_region_init_ram_from_fd(ram, NULL, "xbox.ram", size,
+                                        RAM_SHARED, fd, 0, &err)) {
+        error_free(err);
+        close(fd);
+        return false;
+    }
+    vmstate_register_ram_global(ram);
+    xbox_fastmem_set_ram(ram, fd);
+    return true;
+#else
+    return false;
+#endif
+}
+
 
 static void xbox_memory_init(PCMachineState *pcms,
                              MemoryRegion *system_memory,
@@ -208,8 +245,10 @@ static void xbox_memory_init(PCMachineState *pcms,
      * with older qemus that used qemu_ram_alloc().
      */
     ram = g_malloc(sizeof(*ram));
-    memory_region_init_ram(ram, NULL, "xbox.ram",
-                           machine->ram_size, &error_fatal);
+    if (!xbox_init_fastmem_ram(ram, machine->ram_size)) {
+        memory_region_init_ram(ram, NULL, "xbox.ram",
+                               machine->ram_size, &error_fatal);
+    }
 
     *ram_memory = ram;
     memory_region_add_subregion(system_memory, 0, ram);

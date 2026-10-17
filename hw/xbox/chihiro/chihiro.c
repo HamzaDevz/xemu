@@ -51,6 +51,8 @@
 #include "chihiro-cardreader-crp1231.h"
 #include "chihiro-driveboard-v257.h"
 #include "chihiro-netboard.h"
+#include "chihiro-widescreen.h"
+#include "ui/xemu-widescreen.h"
 #include "ui/xemu-notifications.h"
 
 bool xbox_is_chihiro(void)
@@ -2519,6 +2521,12 @@ static const ChihiroGamePatch chihiro_game_patches[] = {
 
 static void chihiro_patch_running_game(void)
 {
+    /* The display follows the game: the Auto aspect ratio reads this. */
+    if (g_config.chihiro.settings.widescreen &&
+        chihiro_widescreen_apply(chihiro_game_filename, chihiro_guest_rw)) {
+        xemu_set_widescreen(true);
+    }
+
     for (size_t i = 0; i < ARRAY_SIZE(chihiro_game_patches); i++) {
         const ChihiroGamePatch *gp = &chihiro_game_patches[i];
         uint8_t have[16];

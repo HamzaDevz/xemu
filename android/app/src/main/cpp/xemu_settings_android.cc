@@ -10,6 +10,7 @@
 #include <android/log.h>
 
 #include <cctype>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -119,6 +120,7 @@ static void xemu_settings_apply_defaults(void)
     g_config.chihiro.settings.region = CONFIG_CHIHIRO_SETTINGS_REGION_EX;
     g_config.chihiro.settings.dimm_size = CONFIG_CHIHIRO_SETTINGS_DIMM_SIZE_AUTO;
     g_config.chihiro.settings.board_type = CONFIG_CHIHIRO_SETTINGS_BOARD_TYPE_AUTO;
+    g_config.chihiro.settings.widescreen = false;
     g_config.chihiro.link.enable = false;
     g_config.chihiro.link.cabinets = 2;
     g_config.chihiro.link.cabinet = 1;
@@ -623,6 +625,23 @@ bool xemu_settings_load(void)
                 (*ctl == "driving") ? CONFIG_SYS_CHIHIRO_CONTROLS_DRIVING
                                     : CONFIG_SYS_CHIHIRO_CONTROLS_GUN;
         }
+        if (auto wide = tbl["chihiro"]["settings"]["widescreen"].value<bool>()) {
+            g_config.chihiro.settings.widescreen = *wide;
+        }
+        /* The cards a Chihiro game issued (xemu_settings_save keeps them). */
+        auto card_reader = tbl["chihiro"]["card_reader"];
+        const struct { const char *table, *key; const char **cfg; } cards[] = {
+            { "hw210",   "slot1",  &g_config.chihiro.card_reader.hw210.slot1 },
+            { "hw210",   "slot2",  &g_config.chihiro.card_reader.hw210.slot2 },
+            { "hw210",   "gundam", &g_config.chihiro.card_reader.hw210.gundam },
+            { "crp1231", "mt1",    &g_config.chihiro.card_reader.crp1231.mt1 },
+            { "crp1231", "mt2",    &g_config.chihiro.card_reader.crp1231.mt2 },
+        };
+        for (const auto &card : cards) {
+            if (auto v = card_reader[card.table][card.key].value<std::string>()) {
+                xemu_settings_set_string(card.cfg, v->c_str());
+            }
+        }
 
         // System file paths
         if (auto bootrom = sys_files["bootrom_path"].value<std::string>()) {
@@ -650,8 +669,48 @@ bool xemu_settings_load(void)
     return true;
 }
 
+/* The launcher writes everything else into xemu.toml before each boot, so
+ * only what the emulation itself changes is saved back: the cards a Chihiro
+ * game issued, which would otherwise be forgotten at the next launch. */
 void xemu_settings_save(void)
 {
+    const char *path = xemu_settings_get_path();
+    if (!path || *path == '\0') {
+        return;
+    }
+
+    toml::table tbl;
+    if (qemu_access(path, F_OK) == 0) {
+        try {
+            tbl = toml::parse_file(path);
+        } catch (const toml::parse_error &err) {
+            __android_log_print(ANDROID_LOG_WARN, "xemu-settings",
+                                "settings save skipped, xemu.toml unreadable: %s",
+                                err.what());
+            return;
+        }
+    }
+
+    auto ensure = [](toml::table &parent, const char *key) -> toml::table & {
+        if (!parent[key].is_table()) {
+            parent.insert_or_assign(key, toml::table{});
+        }
+        return *parent[key].as_table();
+    };
+    toml::table &card_reader = ensure(ensure(tbl, "chihiro"), "card_reader");
+    toml::table &hw210 = ensure(card_reader, "hw210");
+    toml::table &crp1231 = ensure(card_reader, "crp1231");
+    const auto &cr = g_config.chihiro.card_reader;
+    hw210.insert_or_assign("slot1", cr.hw210.slot1 ? cr.hw210.slot1 : "");
+    hw210.insert_or_assign("slot2", cr.hw210.slot2 ? cr.hw210.slot2 : "");
+    hw210.insert_or_assign("gundam", cr.hw210.gundam ? cr.hw210.gundam : "");
+    crp1231.insert_or_assign("mt1", cr.crp1231.mt1 ? cr.crp1231.mt1 : "");
+    crp1231.insert_or_assign("mt2", cr.crp1231.mt2 ? cr.crp1231.mt2 : "");
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (out.is_open()) {
+        out << tbl;
+    }
 }
 
 void add_net_nat_forward_ports(int host, int guest,

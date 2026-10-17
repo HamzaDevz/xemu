@@ -3,6 +3,8 @@ package com.izzy2lost.x1box
 import android.content.res.Configuration
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.PorterDuff
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -13,6 +15,7 @@ import android.text.style.ClickableSpan
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.widget.BaseAdapter
 import android.widget.ImageButton
 import android.widget.ImageView
@@ -22,9 +25,14 @@ import android.widget.ProgressBar
 import android.widget.Space
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.LinearSnapHelper
+import androidx.recyclerview.widget.RecyclerView
+import coil.dispose
 import coil.load
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -49,6 +57,14 @@ class GameLibraryActivity : AppCompatActivity() {
     const val EXTRA_RESTART_LAST_GAME = "com.izzy2lost.x1box.extra.RESTART_LAST_GAME"
     private const val COVER_FOCUS_SCALE = 1.06f
     private const val COVER_FOCUS_ANIM_MS = 120L
+    /* Below this many games a looping carousel shows the same cover twice. */
+    private const val CAROUSEL_MIN_LOOP_SIZE = 4
+    private const val CAROUSEL_CENTER_SCALE = 1.12f
+    private const val CAROUSEL_SIDE_SCALE = 0.72f
+    /* Side covers are darkened, not faded, so overlapping ones stay opaque. */
+    private const val CAROUSEL_SIDE_BRIGHTNESS = 0.42f
+    private const val CAROUSEL_SIDE_TILT_DEGREES = 28f
+    private const val CAROUSEL_CENTER_SCROLL_MS = 260
     private const val SNAPSHOT_PREVIEW_HEADER_SIZE = 12
     private const val TOTAL_SNAPSHOT_SLOTS = 10
     private const val XDVDFS_SECTOR_SIZE = 2048L
@@ -70,6 +86,12 @@ class GameLibraryActivity : AppCompatActivity() {
     UNKNOWN_ISO,
   }
 
+  private enum class LibraryViewMode {
+    LIST,
+    GRID,
+    CAROUSEL,
+  }
+
   private enum class GameContextAction {
     PER_GAME_SETTINGS,
     SET_CUSTOM_COVER,
@@ -83,6 +105,9 @@ class GameLibraryActivity : AppCompatActivity() {
     val relativePath: String,
     val sizeBytes: Long,
     val discImageFormat: DiscImageFormat,
+    /* From the image's default.xbe: the certificate's name and the title image. */
+    val xbeTitle: String? = null,
+    val xbeIcon: File? = null,
   )
 
   private data class CoverEntry(
@@ -111,6 +136,12 @@ class GameLibraryActivity : AppCompatActivity() {
   private val coverIndex = ConcurrentHashMap<String, String>()
   private val coverCollapsedIndex = ConcurrentHashMap<String, String>()
   /*
+   * A cover's collapsed title by its main title, the part before " - " or
+   * ":": "halo" to "halocombatevolved". An XBE certificate often carries only
+   * that. A main title more than one game shares maps to "".
+   */
+  private val coverMainTitleIndex = HashMap<String, String>()
+  /*
    * Bridges what a Chihiro image calls itself to the cover named after the
    * release: boot.id says "CrazyTaxi HighRoller" and "OutRun2", the covers
    * are "Crazy Taxi 3 High Roller" and "Outrun 2". Also catches a dump
@@ -138,6 +169,7 @@ class GameLibraryActivity : AppCompatActivity() {
   private val chihiroCoverIndex = ConcurrentHashMap<String, String>()
   /* Titles read out of Chihiro images, keyed by uri + size. */
   private val chihiroTitleCache = ConcurrentHashMap<String, String>()
+  private val xbeMetadataCache by lazy { XbeMetadataCache(this) }
   private val coverEntries = ArrayList<CoverEntry>()
   private val coverIndexLock = Any()
   private val discFormatCacheLock = Any()
@@ -160,11 +192,18 @@ class GameLibraryActivity : AppCompatActivity() {
   private lateinit var btnAbout: ImageButton
   private lateinit var btnViewList: MaterialButton
   private lateinit var btnViewGrid: MaterialButton
+  private lateinit var btnViewCarousel: MaterialButton
+  private lateinit var gamesCarousel: RecyclerView
+  private lateinit var carouselLayoutManager: LinearLayoutManager
+  private val carouselSnapHelper = LinearSnapHelper()
 
   private var gamesFolderUri: Uri? = null
   private var scanGeneration = 0
   private var currentGames: List<GameEntry> = emptyList()
-  private var useCoverGrid = false
+  private var viewMode = LibraryViewMode.LIST
+  private var carouselAdapter: CarouselAdapter? = null
+  /* Which game sits in the middle of the carousel, so a rescan keeps it there. */
+  private var carouselCenteredUri: String? = null
   private var boxArtLookupEnabled = true
   @Volatile private var isConvertingIso = false
 
@@ -190,12 +229,15 @@ class GameLibraryActivity : AppCompatActivity() {
       }
     }
 
+  private var exitDialog: androidx.appcompat.app.AlertDialog? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     OrientationLocker(this).enable()
     setContentView(R.layout.activity_game_library)
     EdgeToEdgeHelper.enable(this)
     EdgeToEdgeHelper.applySystemBarPadding(findViewById(R.id.library_scroll))
+    registerExitConfirmation()
 
     if (tryRestartLastGameFromIntent()) {
       return
@@ -214,11 +256,18 @@ class GameLibraryActivity : AppCompatActivity() {
     btnAbout = findViewById(R.id.btn_library_about)
     btnViewList = findViewById(R.id.btn_view_list)
     btnViewGrid = findViewById(R.id.btn_view_grid)
+    btnViewCarousel = findViewById(R.id.btn_view_carousel)
+    gamesCarousel = findViewById(R.id.library_games_carousel)
     btnViewList.isCheckable = true
     btnViewGrid.isCheckable = true
+    btnViewCarousel.isCheckable = true
+    carouselCenteredUri = prefs.getString("library_carousel_uri", null)
+    setupCarousel()
 
     gamesFolderUri = prefs.getString("gamesFolderUri", null)?.let(Uri::parse)
-    useCoverGrid = prefs.getBoolean("library_cover_grid", false)
+    viewMode = prefs.getString("library_view_mode", null)
+      ?.let { name -> LibraryViewMode.entries.firstOrNull { it.name == name } }
+      ?: if (prefs.getBoolean("library_cover_grid", false)) LibraryViewMode.GRID else LibraryViewMode.LIST
     boxArtLookupEnabled = true
     prefs.edit().putBoolean("library_box_art_lookup", true).apply()
 
@@ -243,8 +292,9 @@ class GameLibraryActivity : AppCompatActivity() {
     btnAbout.setOnClickListener {
       showAboutDialog()
     }
-    btnViewList.setOnClickListener { setDisplayMode(false) }
-    btnViewGrid.setOnClickListener { setDisplayMode(true) }
+    btnViewList.setOnClickListener { setDisplayMode(LibraryViewMode.LIST) }
+    btnViewGrid.setOnClickListener { setDisplayMode(LibraryViewMode.GRID) }
+    btnViewCarousel.setOnClickListener { setDisplayMode(LibraryViewMode.CAROUSEL) }
     updateConvertButtonState()
 
     if (!isFolderReady(gamesFolderUri)) {
@@ -264,6 +314,39 @@ class GameLibraryActivity : AppCompatActivity() {
   override fun onDestroy() {
     super.onDestroy()
     coverPersistenceExecutor.shutdownNow()
+  }
+
+  /*
+   * Back (including a controller's B button) on the library used to close the
+   * app instantly. Ask first when the library is the root of the task; from
+   * anywhere else Back keeps its normal meaning.
+   */
+  private fun registerExitConfirmation() {
+    onBackPressedDispatcher.addCallback(
+      this,
+      object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+          if (!isTaskRoot) {
+            isEnabled = false
+            onBackPressedDispatcher.onBackPressed()
+            isEnabled = true
+            return
+          }
+          if (exitDialog?.isShowing == true) {
+            return
+          }
+          exitDialog = MaterialAlertDialogBuilder(
+            this@GameLibraryActivity,
+            R.style.ThemeOverlay_Xemu_RoundedDialog
+          )
+            .setTitle(getString(R.string.library_exit_title, getString(R.string.app_name)))
+            .setMessage(R.string.library_exit_message)
+            .setPositiveButton(R.string.library_exit_confirm) { _, _ -> finish() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        }
+      }
+    )
   }
 
   private fun tryRestartLastGameFromIntent(): Boolean {
@@ -589,18 +672,27 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun syncDisplayModeUi() {
-    btnViewList.isChecked = !useCoverGrid
-    btnViewGrid.isChecked = useCoverGrid
-    gamesListContainer.visibility = if (useCoverGrid) View.GONE else View.VISIBLE
-    gamesGridContainer.visibility = if (useCoverGrid) View.VISIBLE else View.GONE
+    btnViewList.isChecked = viewMode == LibraryViewMode.LIST
+    btnViewGrid.isChecked = viewMode == LibraryViewMode.GRID
+    btnViewCarousel.isChecked = viewMode == LibraryViewMode.CAROUSEL
+    gamesListContainer.visibility =
+      if (viewMode == LibraryViewMode.LIST) View.VISIBLE else View.GONE
+    gamesGridContainer.visibility =
+      if (viewMode == LibraryViewMode.GRID) View.VISIBLE else View.GONE
+    gamesCarousel.visibility =
+      if (viewMode == LibraryViewMode.CAROUSEL) View.VISIBLE else View.GONE
   }
 
-  private fun setDisplayMode(nextGrid: Boolean) {
-    if (nextGrid == useCoverGrid) {
+  private fun setDisplayMode(nextMode: LibraryViewMode) {
+    if (nextMode == viewMode) {
+      syncDisplayModeUi()
       return
     }
-    useCoverGrid = nextGrid
-    prefs.edit().putBoolean("library_cover_grid", useCoverGrid).apply()
+    viewMode = nextMode
+    prefs.edit()
+      .putString("library_view_mode", viewMode.name)
+      .putBoolean("library_cover_grid", viewMode == LibraryViewMode.GRID)
+      .apply()
     syncDisplayModeUi()
     renderGames()
   }
@@ -619,15 +711,19 @@ class GameLibraryActivity : AppCompatActivity() {
     updateConvertButtonState(games)
     gamesListContainer.removeAllViews()
     gamesGridContainer.removeAllViews()
+    if (viewMode != LibraryViewMode.CAROUSEL || games.isEmpty()) {
+      carouselAdapter = null
+      gamesCarousel.adapter = null
+    }
     emptyText.visibility = if (games.isEmpty()) View.VISIBLE else View.GONE
     if (games.isEmpty()) {
       return
     }
 
-    if (useCoverGrid) {
-      renderCoverGrid(games)
-    } else {
-      renderList(games)
+    when (viewMode) {
+      LibraryViewMode.LIST -> renderList(games)
+      LibraryViewMode.GRID -> renderCoverGrid(games)
+      LibraryViewMode.CAROUSEL -> renderCarousel(games)
     }
   }
 
@@ -730,6 +826,267 @@ class GameLibraryActivity : AppCompatActivity() {
     }
   }
 
+  private class CarouselHolder(view: View) : RecyclerView.ViewHolder(view) {
+    val nameText: TextView = view.findViewById(R.id.game_cover_name_text)
+    val convertWarningText: TextView = view.findViewById(R.id.game_cover_convert_warning_text)
+    val coverImage: ImageView = view.findViewById(R.id.game_cover_image)
+    var shade = -1
+  }
+
+  /*
+   * Coverflow: one horizontal row snapped to the middle cover, the rest
+   * shrinking and fading with distance. With enough games it loops, by
+   * reporting a huge item count and wrapping positions back onto the list.
+   */
+  private inner class CarouselAdapter(val games: List<GameEntry>) :
+    RecyclerView.Adapter<CarouselHolder>() {
+    val loops = games.size >= CAROUSEL_MIN_LOOP_SIZE
+    var itemWidthPx = 0
+    /*
+     * Every cover scrolling in is a rebind; resolving it once keeps the
+     * custom/persisted-cover file checks off the UI thread mid-fling.
+     */
+    private val coverModels = HashMap<Int, Any?>()
+
+    override fun getItemCount(): Int = if (loops) Int.MAX_VALUE else games.size
+
+    fun gameAt(position: Int): GameEntry = games[position % games.size]
+
+    /* The adapter position that shows games[index], near the middle when looping. */
+    fun positionOf(index: Int): Int {
+      if (!loops) return index
+      val middle = Int.MAX_VALUE / 2
+      return middle - middle % games.size + index
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CarouselHolder {
+      val view = layoutInflater.inflate(R.layout.item_game_cover, parent, false)
+      view.layoutParams = RecyclerView.LayoutParams(
+        itemWidthPx.coerceAtLeast(1),
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      )
+      val holder = CarouselHolder(view)
+      /* Two lines always, so the row height does not jump while scrolling. */
+      holder.nameText.minLines = 2
+      /* Keep the side tilt from stretching the near edge too much. */
+      view.cameraDistance = 4000f * resources.displayMetrics.density
+      view.setOnFocusChangeListener { focused, hasFocus ->
+        if (hasFocus) centerCarouselChild(focused, smooth = true)
+      }
+      return holder
+    }
+
+    override fun onBindViewHolder(holder: CarouselHolder, position: Int) {
+      val game = gameAt(position)
+      val lp = holder.itemView.layoutParams
+      if (lp.width != itemWidthPx) {
+        lp.width = itemWidthPx
+        holder.itemView.layoutParams = lp
+      }
+      holder.nameText.text = game.title
+      bindConvertibleWarning(holder.convertWarningText, game)
+      holder.itemView.setOnClickListener { view ->
+        /*
+         * A tap on a side cover brings it to the middle; the middle one
+         * launches. A controller press always launches, since focus
+         * already scrolled the cover in.
+         */
+        if (!view.isInTouchMode || isCarouselChildCentered(view)) {
+          launchGame(game)
+        } else {
+          centerCarouselChild(view, smooth = true)
+        }
+      }
+      holder.itemView.setOnLongClickListener { showGameContextMenu(game); true }
+      val index = position % games.size
+      val model = if (coverModels.containsKey(index)) {
+        coverModels[index]
+      } else {
+        resolveCoverModel(game).also { coverModels[index] = it }
+      }
+      holder.shade = -1
+      bindCoverArt(holder.coverImage, game, model)
+    }
+  }
+
+  private fun setupCarousel() {
+    carouselLayoutManager = object : LinearLayoutManager(this, HORIZONTAL, false) {
+      /*
+       * Side covers are pulled in toward the middle, so ones laid out past
+       * the edges are on screen. Lay out two covers' worth beyond each edge,
+       * which also starts their art loading before they arrive.
+       */
+      override fun calculateExtraLayoutSpace(state: RecyclerView.State, extraLayoutSpace: IntArray) {
+        val extra = 2 * (carouselAdapter?.itemWidthPx ?: 0)
+        extraLayoutSpace[0] = extra
+        extraLayoutSpace[1] = extra
+      }
+    }
+    gamesCarousel.layoutManager = carouselLayoutManager
+    gamesCarousel.itemAnimator = null
+    gamesCarousel.setItemViewCacheSize(8)
+    carouselSnapHelper.attachToRecyclerView(gamesCarousel)
+    gamesCarousel.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+      override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+        applyCarouselTransforms()
+      }
+
+      override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+        if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+          rememberCarouselCenter()
+          applyCarouselTransforms()
+        }
+      }
+    })
+    /* Rebinds (resize, cover art arriving) attach children without a scroll callback. */
+    gamesCarousel.addOnChildAttachStateChangeListener(
+      object : RecyclerView.OnChildAttachStateChangeListener {
+        override fun onChildViewAttachedToWindow(view: View) {
+          gamesCarousel.postOnAnimation { applyCarouselTransforms() }
+        }
+
+        override fun onChildViewDetachedFromWindow(view: View) {}
+      }
+    )
+    gamesCarousel.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+      if (right - left != oldRight - oldLeft && right > left) {
+        gamesCarousel.post { sizeCarouselItems() }
+      }
+    }
+  }
+
+  private fun renderCarousel(games: List<GameEntry>) {
+    val adapter = CarouselAdapter(games)
+    adapter.itemWidthPx = carouselAdapter?.itemWidthPx ?: 0
+    carouselAdapter = adapter
+    /*
+     * Attached by sizeCarouselItems once the width is known: unsized items
+     * would be 1px wide, and a looping adapter would inflate a thousand of
+     * them to fill the row. A carousel just made visible gets there through
+     * its layout-change listener.
+     */
+    gamesCarousel.adapter = null
+    sizeCarouselItems()
+  }
+
+  /*
+   * Sized off the screen, not the RecyclerView: the library sits in a
+   * vertical scroll view, so the carousel has no height to fill. Landscape
+   * caps on height so the selected cover and its title stay on screen.
+   */
+  private fun sizeCarouselItems() {
+    val adapter = carouselAdapter ?: return
+    val rvWidth = gamesCarousel.width
+    if (rvWidth <= 0) return
+    val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val screenHeight = resources.displayMetrics.heightPixels
+    val coverHeightCap = screenHeight * (if (landscape) 0.55f else 0.42f)
+    val widthFromHeight = (coverHeightCap * 2f / 3f).toInt()
+    val widthFromWidth = (rvWidth * (if (landscape) 0.30f else 0.55f)).toInt()
+    val itemWidth = maxOf(dp(120), minOf(widthFromHeight, widthFromWidth))
+    val sidePad = maxOf(0, (rvWidth - itemWidth) / 2)
+    /* Room for the centered cover to grow past its slot without clipping. */
+    val itemHeightEstimate = itemWidth * 3 / 2 + dp(64)
+    val vertPad = dp(8) + (itemHeightEstimate * (CAROUSEL_CENTER_SCALE - 1f) / 2f).toInt()
+    gamesCarousel.setPadding(sidePad, vertPad, sidePad, vertPad)
+    if (itemWidth != adapter.itemWidthPx) {
+      adapter.itemWidthPx = itemWidth
+      if (gamesCarousel.adapter === adapter) adapter.notifyDataSetChanged()
+    }
+    if (gamesCarousel.adapter !== adapter) gamesCarousel.adapter = adapter
+    scrollCarouselToRemembered()
+  }
+
+  private fun scrollCarouselToRemembered() {
+    val adapter = carouselAdapter ?: return
+    val index = adapter.games.indexOfFirst { it.uri.toString() == carouselCenteredUri }
+      .coerceAtLeast(0)
+    /* The offset is from the start padding, which is what centers an item. */
+    carouselLayoutManager.scrollToPositionWithOffset(adapter.positionOf(index), 0)
+    gamesCarousel.post { applyCarouselTransforms() }
+  }
+
+  private fun rememberCarouselCenter() {
+    val adapter = carouselAdapter ?: return
+    val snap = carouselSnapHelper.findSnapView(carouselLayoutManager) ?: return
+    val position = gamesCarousel.getChildAdapterPosition(snap)
+    if (position == RecyclerView.NO_POSITION) return
+    val uri = adapter.gameAt(position).uri.toString()
+    if (uri != carouselCenteredUri) {
+      carouselCenteredUri = uri
+      prefs.edit().putString("library_carousel_uri", uri).apply()
+    }
+  }
+
+  private fun isCarouselChildCentered(child: View): Boolean {
+    val childCenter = (child.left + child.right) / 2
+    return kotlin.math.abs(childCenter - gamesCarousel.width / 2) < child.width / 2
+  }
+
+  private fun centerCarouselChild(child: View, smooth: Boolean) {
+    val dx = (child.left + child.right) / 2 - gamesCarousel.width / 2
+    if (dx == 0) return
+    if (smooth) {
+      gamesCarousel.smoothScrollBy(dx, 0, DecelerateInterpolator(1.5f), CAROUSEL_CENTER_SCROLL_MS)
+    } else {
+      gamesCarousel.scrollBy(dx, 0)
+    }
+  }
+
+  /*
+   * Coverflow look, all driven by t, a cover's distance from the middle in
+   * slots. The middle cover is enlarged, lifted and flat with its title;
+   * the rest shrink, darken, turn toward it and stack up behind it. Every
+   * term is smooth in t so nothing steps as covers pass the middle.
+   */
+  private fun applyCarouselTransforms() {
+    val width = gamesCarousel.width
+    if (width <= 0) return
+    val centerX = width / 2f
+    val itemWidth = carouselAdapter?.itemWidthPx?.takeIf { it > 0 }?.toFloat() ?: return
+    val lift = dp(16).toFloat()
+    for (i in 0 until gamesCarousel.childCount) {
+      val child = gamesCarousel.getChildAt(i)
+      val holder = gamesCarousel.getChildViewHolder(child) as? CarouselHolder ?: continue
+      val dx = (child.left + child.right) / 2f - centerX
+      val side = Math.signum(dx)
+      val t = kotlin.math.abs(dx) / itemWidth
+      val near = minOf(1f, t)
+      val eased = near * near * (3f - 2f * near)
+      val focus = 1f - eased
+
+      val scale = CAROUSEL_SIDE_SCALE + (CAROUSEL_CENTER_SCALE - CAROUSEL_SIDE_SCALE) * focus
+      child.scaleX = scale
+      child.scaleY = scale
+      child.rotationY = -side * CAROUSEL_SIDE_TILT_DEGREES * eased
+      /*
+       * Where the cover is drawn, in slots: the neighbours sit 0.75 out
+       * and the rest every 0.5 after, so they overlap like a stack. Its
+       * slope is 1 at the middle (the centre cover tracks the finger) and
+       * 0.5 from one slot out, with no kink in between.
+       */
+      val drawnAt = 0.5f * t + 0.25f * (1f - (1f - near) * (1f - near))
+      child.translationX = side * (drawnAt - t) * itemWidth
+      /* Strictly falling with distance, so inner covers draw over outer ones. */
+      child.translationZ = lift / (1f + t)
+
+      val textAlpha = (1f - minOf(1f, t * 1.5f)).let { it * it }
+      holder.nameText.alpha = textAlpha
+      holder.convertWarningText.alpha = textAlpha
+
+      val brightness = CAROUSEL_SIDE_BRIGHTNESS + (1f - CAROUSEL_SIDE_BRIGHTNESS) * focus
+      val shade = (brightness * 255f).toInt().coerceIn(0, 255)
+      if (shade != holder.shade) {
+        holder.shade = shade
+        if (shade >= 255) {
+          holder.coverImage.clearColorFilter()
+        } else {
+          holder.coverImage.setColorFilter(Color.rgb(shade, shade, shade), PorterDuff.Mode.MULTIPLY)
+        }
+      }
+    }
+  }
+
   private fun resolveCoverGridColumns(): Int {
     val widthDp = resources.configuration.screenWidthDp
     val suggested = (widthDp / 180).coerceIn(2, 4)
@@ -740,63 +1097,81 @@ class GameLibraryActivity : AppCompatActivity() {
     }
   }
 
-  private fun bindCoverArt(coverView: ImageView, game: GameEntry) {
-    coverView.tag = game.uri.toString()
+  private fun bindCoverArt(
+    coverView: ImageView,
+    game: GameEntry,
+    model: Any? = resolveCoverModel(game),
+  ) {
+    /*
+     * The carousel recycles views: a load still running for the game this
+     * view showed before would land on this one. Only a new load cancels it,
+     * so a game with no cover has to.
+     */
+    coverView.dispose()
+    val tag = game.uri.toString()
+    coverView.tag = tag
     showCoverPlaceholder(coverView)
+    if (model != null) {
+      loadCoverArtIntoView(coverView, model, tag)
+    }
+  }
 
+  /*
+   * A custom or persisted cover file, a box-art URL, the title image from the
+   * game's own executable, or null for the placeholder. Box art is matched by
+   * the file's name, then by the name in the executable's certificate.
+   */
+  private fun resolveCoverModel(game: GameEntry): Any? {
     val customFile = getCustomCoverFile(game)
     if (customFile.exists()) {
-      loadCoverArtIntoView(coverView, customFile)
-      return
+      return customFile
     }
 
-    val key = normalizeCoverKey(game.title)
+    /*
+     * An arcade release and its Xbox port share a name (OutRun 2, Crazy
+     * Taxi 3) but not art, so a Chihiro entry's cover is cached apart.
+     */
+    val chihiro = isChihiroEntry(game)
+    val key = (if (chihiro) "chihiro " else "") + normalizeCoverKey(game.title)
     val persistedFile = getPersistedCoverFile(key)
     if (persistedFile.exists() && persistedFile.length() > 0L) {
-      loadCoverArtIntoView(coverView, persistedFile)
-      return
+      return persistedFile
     }
 
-    if (!boxArtLookupEnabled) {
-      return
+    if (boxArtLookupEnabled) {
+      val chihiroUrl = if (chihiro) lookupChihiroCoverUrl(game.title) else null
+      /*
+       * Never a fuzzy guess at Xbox art for an arcade game: "Mahjong Fight
+       * Club" scores as Fight Club. The aliases cover the real near-misses.
+       */
+      val url = boxArtCache[key]
+        ?: chihiroUrl
+        ?: lookupBoxArtUrl(game.title, game.xbeTitle, fuzzy = !chihiro)
+      if (url != null) {
+        boxArtCache[key] = url
+        persistDownloadedCoverAsync(key, url)
+        return url
+      }
     }
 
-    val cachedUrl = boxArtCache[key]
-    if (cachedUrl != null) {
-      applyBoxArtToView(coverView, key, cachedUrl)
-      return
-    }
-
-    val chihiroUrl = if (isChihiroEntry(game)) {
-      lookupChihiroCoverUrl(game.title)
-    } else {
-      null
-    }
-    val url = chihiroUrl ?: lookupBoxArtUrl(game.title) ?: return
-    boxArtCache[key] = url
-    if (coverView.tag == game.uri.toString()) {
-      applyBoxArtToView(coverView, key, url)
-    }
+    return game.xbeIcon?.takeIf { it.isFile }
   }
 
-  private fun applyBoxArtToView(coverView: ImageView, key: String, url: String) {
-    persistDownloadedCoverAsync(key, url)
-    loadCoverArtIntoView(coverView, url)
-  }
-
-  private fun loadCoverArtIntoView(coverView: ImageView, model: Any) {
+  private fun loadCoverArtIntoView(coverView: ImageView, model: Any, tag: String) {
     coverView.load(model) {
       crossfade(true)
       placeholder(R.drawable.ic_xemu_image_placeholder)
       error(R.drawable.ic_xemu_image_placeholder)
       listener(
         onSuccess = { _, _ ->
-          if (coverView.tag != null) {
+          if (coverView.tag == tag) {
             coverView.background = null
           }
         },
         onError = { _, _ ->
-          showCoverPlaceholder(coverView)
+          if (coverView.tag == tag) {
+            showCoverPlaceholder(coverView)
+          }
         }
       )
     }
@@ -893,7 +1268,11 @@ class GameLibraryActivity : AppCompatActivity() {
     return chihiroCoverIndex[collapsed]
   }
 
-  private fun lookupBoxArtUrl(title: String): String? {
+  private fun lookupBoxArtUrl(
+    title: String,
+    certificateTitle: String? = null,
+    fuzzy: Boolean = true,
+  ): String? {
     ensureCoverIndexLoaded()
     val candidates = linkedSetOf<String>()
     val cleanTitle = normalizeLookupTitle(title)
@@ -929,7 +1308,10 @@ class GameLibraryActivity : AppCompatActivity() {
       }
     }
 
-    val fuzzyMatch = findClosestCoverUrl(candidates)
+    /* The executable's own name before a fuzzy guess at the file's. */
+    certificateTitle?.let(::lookupCertificateCoverUrl)?.let { return it }
+
+    val fuzzyMatch = if (fuzzy) findClosestCoverUrl(candidates) else null
     if (!fuzzyMatch.isNullOrBlank()) {
       for (key in candidates) {
         coverIndex.putIfAbsent(key, fuzzyMatch)
@@ -941,7 +1323,10 @@ class GameLibraryActivity : AppCompatActivity() {
       return fuzzyMatch
     }
 
-    boxArtMisses.add(normalizedTitle)
+    /* A miss without the fuzzy pass says nothing about a lookup with it. */
+    if (fuzzy) {
+      boxArtMisses.add(normalizedTitle)
+    }
     return null
   }
 
@@ -989,6 +1374,12 @@ class GameLibraryActivity : AppCompatActivity() {
           val collapsed = collapseCoverKey(canonical)
           if (collapsed.isNotEmpty()) {
             coverCollapsedIndex.putIfAbsent(collapsed, url)
+          }
+          val mainTitle = collapseCoverKey(canonical.substringBefore(" - ").substringBefore(":"))
+          if (mainTitle.isNotEmpty() && mainTitle != collapsed) {
+            val existing = coverMainTitleIndex[mainTitle]
+            coverMainTitleIndex[mainTitle] =
+              if (existing == null || existing == collapsed) collapsed else ""
           }
           if (canonical.isNotEmpty() && seenEntries.add("$canonical|$url")) {
             val tokens = tokenizeCoverKey(canonical)
@@ -1048,6 +1439,32 @@ class GameLibraryActivity : AppCompatActivity() {
 
   private fun collapseCoverKey(input: String): String {
     return normalizeCoverKey(input).replace(Regex("[^a-z0-9]+"), "")
+  }
+
+  /*
+   * A cover for the name in a game's XBE certificate. Exact matches only: the
+   * certificate names the game outright, and a short name like "Halo" would
+   * fuzzy-match a sequel's cover.
+   */
+  private fun lookupCertificateCoverUrl(certificateTitle: String): String? {
+    val candidates = linkedSetOf<String>()
+    addCoverLookupCandidates(candidates, certificateTitle)
+    addCoverLookupCandidates(candidates, certificateTitle.replace(":", ""))
+    for (key in candidates) {
+      coverIndex[key]?.let { return it }
+    }
+    for (key in candidates) {
+      val collapsed = collapseCoverKey(key)
+      if (collapsed.isBlank()) {
+        continue
+      }
+      coverCollapsedIndex[collapsed]?.let { return it }
+      coverMainTitleIndex[collapsed]
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { coverCollapsedIndex[it] }
+        ?.let { return it }
+    }
+    return null
   }
 
   private fun tokenizeCoverKey(input: String): Set<String> {
@@ -1562,6 +1979,7 @@ class GameLibraryActivity : AppCompatActivity() {
 
     val games = ArrayList<GameEntry>()
     val seenDiscFormatKeys = HashSet<String>()
+    val seenXbeKeys = HashSet<String>()
     while (stack.isNotEmpty()) {
       val (node, prefix) = stack.removeLast()
       val files = try {
@@ -1579,13 +1997,23 @@ class GameLibraryActivity : AppCompatActivity() {
           continue
         }
         val sizeBytes = child.length()
+        val discImageFormat = resolveDiscImageFormat(child.uri, name, sizeBytes, seenDiscFormatKeys)
+        val xbe = if (discImageFormat == DiscImageFormat.XISO ||
+          discImageFormat == DiscImageFormat.REGULAR_ISO
+        ) {
+          xbeMetadataCache.get(child.uri, sizeBytes, seenXbeKeys)
+        } else {
+          null
+        }
         games.add(
           GameEntry(
             title = chihiroImageTitle(child.uri, name, sizeBytes) ?: toGameTitle(name),
             uri = child.uri,
             relativePath = prefix + name,
             sizeBytes = sizeBytes,
-            discImageFormat = resolveDiscImageFormat(child.uri, name, sizeBytes, seenDiscFormatKeys),
+            discImageFormat = discImageFormat,
+            xbeTitle = xbe?.titleName?.ifBlank { null },
+            xbeIcon = xbe?.icon,
           )
         )
       }
@@ -1593,6 +2021,7 @@ class GameLibraryActivity : AppCompatActivity() {
 
     games.sortBy { it.title.lowercase(Locale.ROOT) }
     persistDiscFormatCache(seenDiscFormatKeys)
+    xbeMetadataCache.persist(seenXbeKeys)
     return games
   }
 

@@ -28,6 +28,11 @@
 #endif
 #endif
 
+/*
+ * Pure math helpers are TCG_CALL_NO_RWG: they only touch the vector registers
+ * and sse_status through their pointer arguments and never raise, so the
+ * translated code need not spill and reload the guest registers around them.
+ */
 #define dh_alias_Reg ptr
 #define dh_alias_ZMMReg ptr
 #define dh_alias_MMXReg ptr
@@ -74,9 +79,11 @@ SSE_HELPER_B(pavgb, FAVG)
 SSE_HELPER_W(pavgw, FAVG)
 
 DEF_HELPER_4(glue(pmuludq, SUFFIX), void, env, Reg, Reg, Reg)
-DEF_HELPER_4(glue(pmaddwd, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(pmaddwd, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
 
-DEF_HELPER_4(glue(psadbw, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(psadbw, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
 #if SHIFT < 2
 DEF_HELPER_4(glue(maskmov, SUFFIX), void, env, Reg, Reg, tl)
 #endif
@@ -94,29 +101,37 @@ DEF_HELPER_3(glue(pshufhw, SUFFIX), void, Reg, Reg, int)
 /* XXX: not accurate */
 
 #define SSE_HELPER_P4(name)                                             \
-    DEF_HELPER_4(glue(name ## ps, SUFFIX), void, env, Reg, Reg, Reg)    \
-    DEF_HELPER_4(glue(name ## pd, SUFFIX), void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(glue(name ## ps, SUFFIX), TCG_CALL_NO_RWG,       \
+                       void, env, Reg, Reg, Reg)                        \
+    DEF_HELPER_FLAGS_4(glue(name ## pd, SUFFIX), TCG_CALL_NO_RWG,       \
+                       void, env, Reg, Reg, Reg)
 
 #define SSE_HELPER_P3(name, ...)                                        \
-    DEF_HELPER_3(glue(name ## ps, SUFFIX), void, env, Reg, Reg)         \
-    DEF_HELPER_3(glue(name ## pd, SUFFIX), void, env, Reg, Reg)
+    DEF_HELPER_FLAGS_3(glue(name ## ps, SUFFIX), TCG_CALL_NO_RWG,       \
+                       void, env, Reg, Reg)                             \
+    DEF_HELPER_FLAGS_3(glue(name ## pd, SUFFIX), TCG_CALL_NO_RWG,       \
+                       void, env, Reg, Reg)
 
 #if SHIFT == 1
 #define SSE_HELPER_S4(name)                                             \
     SSE_HELPER_P4(name)                                                 \
-    DEF_HELPER_4(name ## ss, void, env, Reg, Reg, Reg)                  \
-    DEF_HELPER_4(name ## sd, void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(name ## ss, TCG_CALL_NO_RWG,                     \
+                       void, env, Reg, Reg, Reg)                        \
+    DEF_HELPER_FLAGS_4(name ## sd, TCG_CALL_NO_RWG, void, env, Reg, Reg, Reg)
 #define SSE_HELPER_S3(name)                                             \
     SSE_HELPER_P3(name)                                                 \
-    DEF_HELPER_4(name ## ss, void, env, Reg, Reg, Reg)                  \
-    DEF_HELPER_4(name ## sd, void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(name ## ss, TCG_CALL_NO_RWG,                     \
+                       void, env, Reg, Reg, Reg)                        \
+    DEF_HELPER_FLAGS_4(name ## sd, TCG_CALL_NO_RWG, void, env, Reg, Reg, Reg)
 #else
 #define SSE_HELPER_S4(name, ...) SSE_HELPER_P4(name)
 #define SSE_HELPER_S3(name, ...) SSE_HELPER_P3(name)
 #endif
 
-DEF_HELPER_4(glue(shufps, SUFFIX), void, Reg, Reg, Reg, int)
-DEF_HELPER_4(glue(shufpd, SUFFIX), void, Reg, Reg, Reg, int)
+DEF_HELPER_FLAGS_4(glue(shufps, SUFFIX), TCG_CALL_NO_RWG,
+                   void, Reg, Reg, Reg, int)
+DEF_HELPER_FLAGS_4(glue(shufpd, SUFFIX), TCG_CALL_NO_RWG,
+                   void, Reg, Reg, Reg, int)
 
 SSE_HELPER_S4(add)
 SSE_HELPER_S4(sub)
@@ -127,46 +142,50 @@ SSE_HELPER_S4(max)
 
 SSE_HELPER_S3(sqrt)
 
-DEF_HELPER_3(glue(cvtps2pd, SUFFIX), void, env, Reg, Reg)
-DEF_HELPER_3(glue(cvtpd2ps, SUFFIX), void, env, Reg, Reg)
-DEF_HELPER_3(glue(cvtdq2ps, SUFFIX), void, env, Reg, Reg)
-DEF_HELPER_3(glue(cvtdq2pd, SUFFIX), void, env, Reg, Reg)
+DEF_HELPER_FLAGS_3(glue(cvtps2pd, SUFFIX), TCG_CALL_NO_RWG, void, env, Reg, Reg)
+DEF_HELPER_FLAGS_3(glue(cvtpd2ps, SUFFIX), TCG_CALL_NO_RWG, void, env, Reg, Reg)
+DEF_HELPER_FLAGS_3(glue(cvtdq2ps, SUFFIX), TCG_CALL_NO_RWG, void, env, Reg, Reg)
+DEF_HELPER_FLAGS_3(glue(cvtdq2pd, SUFFIX), TCG_CALL_NO_RWG, void, env, Reg, Reg)
 
-DEF_HELPER_3(glue(cvtps2dq, SUFFIX), void, env, ZMMReg, ZMMReg)
-DEF_HELPER_3(glue(cvtpd2dq, SUFFIX), void, env, ZMMReg, ZMMReg)
+DEF_HELPER_FLAGS_3(glue(cvtps2dq, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, ZMMReg, ZMMReg)
+DEF_HELPER_FLAGS_3(glue(cvtpd2dq, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, ZMMReg, ZMMReg)
 
-DEF_HELPER_3(glue(cvttps2dq, SUFFIX), void, env, ZMMReg, ZMMReg)
-DEF_HELPER_3(glue(cvttpd2dq, SUFFIX), void, env, ZMMReg, ZMMReg)
+DEF_HELPER_FLAGS_3(glue(cvttps2dq, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, ZMMReg, ZMMReg)
+DEF_HELPER_FLAGS_3(glue(cvttpd2dq, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, ZMMReg, ZMMReg)
 
 #if SHIFT == 1
-DEF_HELPER_4(cvtss2sd, void, env, Reg, Reg, Reg)
-DEF_HELPER_4(cvtsd2ss, void, env, Reg, Reg, Reg)
-DEF_HELPER_3(cvtpi2ps, void, env, ZMMReg, MMXReg)
-DEF_HELPER_3(cvtpi2pd, void, env, ZMMReg, MMXReg)
-DEF_HELPER_3(cvtsi2ss, void, env, ZMMReg, i32)
-DEF_HELPER_3(cvtsi2sd, void, env, ZMMReg, i32)
+DEF_HELPER_FLAGS_4(cvtss2sd, TCG_CALL_NO_RWG, void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(cvtsd2ss, TCG_CALL_NO_RWG, void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_3(cvtpi2ps, TCG_CALL_NO_RWG, void, env, ZMMReg, MMXReg)
+DEF_HELPER_FLAGS_3(cvtpi2pd, TCG_CALL_NO_RWG, void, env, ZMMReg, MMXReg)
+DEF_HELPER_FLAGS_3(cvtsi2ss, TCG_CALL_NO_RWG, void, env, ZMMReg, i32)
+DEF_HELPER_FLAGS_3(cvtsi2sd, TCG_CALL_NO_RWG, void, env, ZMMReg, i32)
 
 #ifdef TARGET_X86_64
-DEF_HELPER_3(cvtsq2ss, void, env, ZMMReg, i64)
-DEF_HELPER_3(cvtsq2sd, void, env, ZMMReg, i64)
+DEF_HELPER_FLAGS_3(cvtsq2ss, TCG_CALL_NO_RWG, void, env, ZMMReg, i64)
+DEF_HELPER_FLAGS_3(cvtsq2sd, TCG_CALL_NO_RWG, void, env, ZMMReg, i64)
 #endif
 
-DEF_HELPER_3(cvtps2pi, void, env, MMXReg, ZMMReg)
-DEF_HELPER_3(cvtpd2pi, void, env, MMXReg, ZMMReg)
-DEF_HELPER_2(cvtss2si, s32, env, ZMMReg)
-DEF_HELPER_2(cvtsd2si, s32, env, ZMMReg)
+DEF_HELPER_FLAGS_3(cvtps2pi, TCG_CALL_NO_RWG, void, env, MMXReg, ZMMReg)
+DEF_HELPER_FLAGS_3(cvtpd2pi, TCG_CALL_NO_RWG, void, env, MMXReg, ZMMReg)
+DEF_HELPER_FLAGS_2(cvtss2si, TCG_CALL_NO_RWG, s32, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvtsd2si, TCG_CALL_NO_RWG, s32, env, ZMMReg)
 #ifdef TARGET_X86_64
-DEF_HELPER_2(cvtss2sq, s64, env, ZMMReg)
-DEF_HELPER_2(cvtsd2sq, s64, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvtss2sq, TCG_CALL_NO_RWG, s64, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvtsd2sq, TCG_CALL_NO_RWG, s64, env, ZMMReg)
 #endif
 
-DEF_HELPER_3(cvttps2pi, void, env, MMXReg, ZMMReg)
-DEF_HELPER_3(cvttpd2pi, void, env, MMXReg, ZMMReg)
-DEF_HELPER_2(cvttss2si, s32, env, ZMMReg)
-DEF_HELPER_2(cvttsd2si, s32, env, ZMMReg)
+DEF_HELPER_FLAGS_3(cvttps2pi, TCG_CALL_NO_RWG, void, env, MMXReg, ZMMReg)
+DEF_HELPER_FLAGS_3(cvttpd2pi, TCG_CALL_NO_RWG, void, env, MMXReg, ZMMReg)
+DEF_HELPER_FLAGS_2(cvttss2si, TCG_CALL_NO_RWG, s32, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvttsd2si, TCG_CALL_NO_RWG, s32, env, ZMMReg)
 #ifdef TARGET_X86_64
-DEF_HELPER_2(cvttss2sq, s64, env, ZMMReg)
-DEF_HELPER_2(cvttsd2sq, s64, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvttss2sq, TCG_CALL_NO_RWG, s64, env, ZMMReg)
+DEF_HELPER_FLAGS_2(cvttsd2sq, TCG_CALL_NO_RWG, s64, env, ZMMReg)
 #endif
 #endif
 
@@ -235,20 +254,28 @@ DEF_HELPER_2(glue(movmskps, SUFFIX), i32, env, Reg)
 DEF_HELPER_2(glue(movmskpd, SUFFIX), i32, env, Reg)
 #endif
 
-DEF_HELPER_4(glue(packsswb, SUFFIX), void, env, Reg, Reg, Reg)
-DEF_HELPER_4(glue(packuswb, SUFFIX), void, env, Reg, Reg, Reg)
-DEF_HELPER_4(glue(packssdw, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(packsswb, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(packuswb, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(packssdw, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
 #define UNPCK_OP(name, base)                                       \
-    DEF_HELPER_4(glue(punpck ## name ## bw, SUFFIX), void, env, Reg, Reg, Reg) \
-    DEF_HELPER_4(glue(punpck ## name ## wd, SUFFIX), void, env, Reg, Reg, Reg) \
-    DEF_HELPER_4(glue(punpck ## name ## dq, SUFFIX), void, env, Reg, Reg, Reg)
+    DEF_HELPER_FLAGS_4(glue(punpck ## name ## bw, SUFFIX), TCG_CALL_NO_RWG, \
+                       void, env, Reg, Reg, Reg)                        \
+    DEF_HELPER_FLAGS_4(glue(punpck ## name ## wd, SUFFIX), TCG_CALL_NO_RWG, \
+                       void, env, Reg, Reg, Reg)                        \
+    DEF_HELPER_FLAGS_4(glue(punpck ## name ## dq, SUFFIX), TCG_CALL_NO_RWG, \
+                       void, env, Reg, Reg, Reg)
 
 UNPCK_OP(l, 0)
 UNPCK_OP(h, 1)
 
 #if SHIFT >= 1
-DEF_HELPER_4(glue(punpcklqdq, SUFFIX), void, env, Reg, Reg, Reg)
-DEF_HELPER_4(glue(punpckhqdq, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(punpcklqdq, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(punpckhqdq, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
 #endif
 
 /* 3DNow! float ops */
@@ -311,7 +338,8 @@ DEF_HELPER_3(glue(pmovsldup, SUFFIX), void, env, Reg, Reg)
 DEF_HELPER_3(glue(pmovshdup, SUFFIX), void, env, Reg, Reg)
 DEF_HELPER_3(glue(pmovdldup, SUFFIX), void, env, Reg, Reg)
 DEF_HELPER_4(glue(pmuldq, SUFFIX), void, env, Reg, Reg, Reg)
-DEF_HELPER_4(glue(packusdw, SUFFIX), void, env, Reg, Reg, Reg)
+DEF_HELPER_FLAGS_4(glue(packusdw, SUFFIX), TCG_CALL_NO_RWG,
+                   void, env, Reg, Reg, Reg)
 #if SHIFT == 1
 DEF_HELPER_3(glue(phminposuw, SUFFIX), void, env, Reg, Reg)
 #endif

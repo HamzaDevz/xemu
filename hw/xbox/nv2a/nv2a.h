@@ -52,5 +52,6 @@ int nv2a_get_screen_off(void);
  * Android direct Vulkan display loop only syncs the display when it moves.
  */
 uint32_t nv2a_get_display_seq(void);
+uint64_t nv2a_get_display_generation(void);
 
 #endif

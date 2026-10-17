@@ -182,6 +182,25 @@
               app:iconGravity="textStart"
               app:iconPadding="0dp"
               app:iconTint="@color/game_library_view_toggle_content" />
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_view_carousel"
+              style="@style/Widget.Xemu.Button.Outlined"
+              android:layout_width="40dp"
+              android:layout_height="40dp"
+              android:layout_marginStart="6dp"
+              android:insetTop="0dp"
+              android:insetBottom="0dp"
+              android:minWidth="0dp"
+              android:minHeight="0dp"
+              android:padding="0dp"
+              android:contentDescription="@string/library_view_carousel"
+              android:textColor="@color/game_library_view_toggle_content"
+              app:backgroundTint="@color/game_library_view_toggle_background"
+              app:icon="@drawable/ic_xemu_view_carousel"
+              app:iconGravity="textStart"
+              app:iconPadding="0dp"
+              app:iconTint="@color/game_library_view_toggle_content" />
           </LinearLayout>
 
           <LinearLayout
@@ -262,6 +281,19 @@
             android:clipChildren="false"
             android:clipToPadding="false"
             android:orientation="vertical"
+            android:visibility="gone" />
+
+          <!-- Bleeds over the card padding so side covers slide to the card edge. -->
+          <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/library_games_carousel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="-24dp"
+            android:layout_marginTop="8dp"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:nestedScrollingEnabled="false"
+            android:overScrollMode="never"
             android:visibility="gone" />
         </LinearLayout>
       </com.google.android.material.card.MaterialCardView>

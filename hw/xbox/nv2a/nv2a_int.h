@@ -137,6 +137,7 @@ typedef struct NV2AState {
 
     struct {
         uint32_t regs[0x1000];
+        uint32_t write_seq; /* Bumped on every register write */
     } pvideo;
 
     struct {

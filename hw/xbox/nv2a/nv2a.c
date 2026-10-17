@@ -209,6 +209,26 @@ uint32_t nv2a_get_display_seq(void)
     return g_nv2a ? qatomic_read(&g_nv2a->display_seq) : 0;
 }
 
+/*
+ * Changes whenever the guest may have changed what is on screen: a flip, a
+ * new scanout address, or any overlay (video) register write. Presenting
+ * again while it is unchanged would show the same picture.
+ */
+uint64_t nv2a_get_display_generation(void)
+{
+    NV2AState *d = g_nv2a;
+    if (!d) {
+        return 0;
+    }
+
+    const uint64_t k = 0x9e3779b97f4a7c15ull;
+    uint64_t h = qatomic_read(&g_nv2a_stats.frame_count);
+    h = h * k ^ (uint32_t)qatomic_read(&d->pgraph.frame_time);
+    h = h * k ^ qatomic_read(&d->pcrtc.start);
+    h = h * k ^ qatomic_read(&d->pvideo.write_seq);
+    return h;
+}
+
 static int64_t nv2a_calc_vblank_period_ns(NV2AState *d)
 {
     uint32_t vdisplay = d->pramdac.fp_vdisplay_end;

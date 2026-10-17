@@ -166,7 +166,30 @@ The controller maps to standard SDL controller inputs:
 
 ## Customization
 
-### Adjusting Button Positions
+### In-game layout editor
+
+Game Menu → **Edit Touch Layout** pauses the game and puts the overlay in edit
+mode. Controls move in groups (face buttons, D-pad, each stick, each trigger,
+Back, Start, White, Black, LS, RS):
+
+- Drag a group to move it; pinch, or use **Smaller**/**Larger**, to resize it (50%–250%)
+- **Hide**/**Show** removes a group from play; hidden groups stay faintly visible while editing
+- **Opacity** cycles the whole overlay from 100% down to 25%
+- **Reset** restores the default layout; **Done** (or Back) saves and resumes
+
+The layout is stored per element in `ControllerSettings.touchLayout` as a
+centre fraction plus scale, so it survives resolution changes.
+
+### Physical controller remapping
+
+Game Menu → **Remap Controller** lists every Xbox input. Tap one and press the
+button or pull the trigger to bind it, or pick from a list. The table goes to
+`xemu-input.c` through `nativeSetControllerRemap()` and applies to every
+physical pad. It never applies to the on-screen controller, which is
+recognised by its GUID. With the default mapping, nothing is sent and the
+`gamepad_mappings` from `xemu.toml` stay in charge.
+
+### Adjusting the default button positions
 
 Edit `initializeControls()` in `OnScreenController.kt` to modify button positions:
 
@@ -204,10 +227,8 @@ val stickRadius = w * 0.08f       // 8% of screen width
 
 Potential improvements:
 - Haptic feedback on button press
-- Customizable button layouts
-- Save/load custom controller configurations
-- Opacity and scale adjustments via UI
-- Button remapping
+- Save/load named controller configurations
+- Per-game layouts and mappings
 - Portrait/landscape specific layouts
 - Gesture support (swipe for quick actions)
 

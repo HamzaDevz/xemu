@@ -392,6 +392,22 @@
             android:textAppearance="@style/TextAppearance.Material3.BodySmall"
             android:textColor="@color/xemu_text_muted" />
 
+          <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switch_chihiro_widescreen"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
+            android:text="@string/settings_chihiro_widescreen"
+            android:textColor="@color/xemu_text_muted" />
+
+          <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:text="@string/settings_chihiro_widescreen_desc"
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            android:textColor="@color/xemu_text_muted" />
+
           <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -757,6 +773,100 @@
               android:layout_weight="1"
               android:text="@string/settings_insignia_register_action" />
           </LinearLayout>
+
+          <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp"
+            android:text="@string/settings_lan_title"
+            android:textAppearance="@style/TextAppearance.Material3.TitleSmall"
+            android:textColor="@color/xemu_text_muted" />
+
+          <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/toggle_lan_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_lan_off"
+              style="?attr/materialButtonOutlinedStyle"
+              android:layout_width="0dp"
+              android:layout_height="wrap_content"
+              android:layout_weight="1"
+              android:text="@string/settings_lan_off" />
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_lan_host"
+              style="?attr/materialButtonOutlinedStyle"
+              android:layout_width="0dp"
+              android:layout_height="wrap_content"
+              android:layout_weight="1"
+              android:text="@string/settings_lan_host" />
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_lan_join"
+              style="?attr/materialButtonOutlinedStyle"
+              android:layout_width="0dp"
+              android:layout_height="wrap_content"
+              android:layout_weight="1"
+              android:text="@string/settings_lan_join" />
+          </com.google.android.material.button.MaterialButtonToggleGroup>
+
+          <LinearLayout
+            android:id="@+id/layout_lan_join"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <com.google.android.material.textfield.TextInputLayout
+              android:id="@+id/input_lan_host"
+              style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+              android:layout_width="0dp"
+              android:layout_height="wrap_content"
+              android:layout_weight="1"
+              android:hint="@string/settings_lan_host_address">
+
+              <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/edit_lan_host"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:imeOptions="actionDone"
+                android:inputType="textUri"
+                android:maxLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_lan_find_hosts"
+              style="@style/Widget.Xemu.Button.Outlined.Pill"
+              android:layout_width="wrap_content"
+              android:layout_height="wrap_content"
+              android:layout_marginStart="8dp"
+              android:text="@string/settings_lan_find_hosts" />
+          </LinearLayout>
+
+          <TextView
+            android:id="@+id/tv_lan_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            android:textColor="@color/xemu_text_muted" />
+
+          <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_lan_randomize_mac"
+            style="@style/Widget.Xemu.Button.Outlined.Pill"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/settings_lan_randomize_mac" />
 
           <View
             android:layout_width="match_parent"

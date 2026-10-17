@@ -117,6 +117,8 @@ typedef struct V257DriveBoard {
     uint8_t  state;      /* V257_* */
     int      countdown;  /* service ticks left in a power-up or self-test */
     int      torque_ticks;  /* service ticks left in the push */
+    int16_t  steer;      /* the player's stick, -32768..32767, 0 let go */
+    uint16_t rest;       /* where the wheel sits when let go, 0-0x3FF */
 } V257DriveBoard;
 
 /* What the board drives the wheel with, for the host's force feedback: the
@@ -136,6 +138,10 @@ void    v257_set_motor(V257DriveBoard *db, bool on);
 /* Where the wheel is, 0-0x3FF, from the host input (a real V257 reads the
  * column's encoder). */
 void    v257_set_wheel(V257DriveBoard *db, uint16_t pos);
+/* Or from a stick, which springs back to its middle: 0 is a released wheel,
+ * which sits where the motor holds it; full deflection is the end stop. */
+void    v257_set_steer(V257DriveBoard *db, int16_t deflection);
+uint16_t v257_wheel(V257DriveBoard *db);
 void    v257_receive_byte(V257DriveBoard *db, uint8_t byte);
 bool    v257_has_response(V257DriveBoard *db);
 uint8_t v257_get_response(V257DriveBoard *db);
