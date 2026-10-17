@@ -1194,6 +1194,7 @@ static SetupFiles SyncSetupFiles() {
 
 extern "C" int xemu_android_main(int argc, char** argv);
 extern "C" void qemu_init(int argc, char** argv);
+extern "C" void qemu_thread_naming(bool enable);
 extern "C" int (*qemu_main)(void);
 extern "C" void xemu_android_display_preinit(void);
 extern "C" void xemu_android_display_wait_ready(void);
@@ -1377,6 +1378,8 @@ extern "C" int xemu_android_main(int argc, char** argv) {
     return 1;
   }
   LogInfo("xemu_android_main: qemu_init");
+  /* Every thread is otherwise "qemu_main" in top and simpleperf */
+  qemu_thread_naming(true);
   auto t_init_start = SDL_GetTicks();
   qemu_init(argc, argv);
   auto t_init_end = SDL_GetTicks();
