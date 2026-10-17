@@ -2,6 +2,8 @@
 #define XEMU_ANDROID_CONFIG_TARGET_H
 
 #define CONFIG_SOFTMMU 1
+/* Set by meson for system emulators; without it the guest's HLT is a no-op */
+#define CONFIG_SYSTEM_ONLY 1
 
 #define TARGET_I386 1
 #define TARGET_ABI_BITS 32

@@ -4231,6 +4231,14 @@ static void gen_STD(DisasContext *s, X86DecodedInsn *decode)
 static void gen_STI(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_set_eflags(s, IF_MASK);
+#ifdef XBOX
+    if (s->xbox_idle) {
+        /* see xbox_idle_follows(); an interrupt returns to the first NOP */
+        gen_update_cc_op(s);
+        gen_update_eip_next(s);
+        gen_helper_xbox_idle(tcg_env);
+    }
+#endif
     s->base.is_jmp = DISAS_EOB_INHIBIT_IRQ;
 }
 

@@ -2845,6 +2845,10 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         }
     }
 
+#ifdef XBOX
+    s->xbox_idle = decode.e.gen == gen_STI && xbox_idle_follows(env, s);
+#endif
+
     if (decode.e.special == X86_SPECIAL_MMX &&
         !(s->prefix & (PREFIX_REPZ | PREFIX_REPNZ | PREFIX_DATA))) {
         gen_enter_mmx(s);

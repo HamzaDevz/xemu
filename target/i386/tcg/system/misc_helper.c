@@ -521,6 +521,21 @@ G_NORETURN void helper_hlt(CPUX86State *env)
     cpu_loop_exit(cs);
 }
 
+#ifdef XBOX
+/* STI of the kernel idle loop, see xbox_idle_follows() */
+void helper_xbox_idle(CPUX86State *env)
+{
+    uint32_t dpc_queue = env->regs[R_EBP];
+    uint32_t next_thread = env->regs[R_EBX] + 0x2c;
+    uintptr_t ra = GETPC();
+
+    if (cpu_ldl_data_ra(env, dpc_queue, ra) == dpc_queue &&
+        cpu_ldl_data_ra(env, next_thread, ra) == 0) {
+        helper_hlt(env);
+    }
+}
+#endif
+
 void helper_monitor(CPUX86State *env, target_ulong ptr)
 {
     if ((uint32_t)env->regs[R_ECX] != 0) {

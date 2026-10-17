@@ -226,6 +226,9 @@ typedef struct DisasContext {
     bool vex_w; /* used by AVX even on 32-bit processors */
     bool jmp_opt; /* use direct block chaining for direct jumps */
     bool cc_op_dirty;
+#ifdef XBOX
+    bool xbox_idle; /* this STI opens the kernel idle loop */
+#endif
 
     /*
      * enter_mmx state tracking. gen_enter_mmx() is idempotent, so a run of
@@ -3162,6 +3165,62 @@ static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
     tcg_gen_ld_i128(t, tcg_env, offset + offsetof(YMMReg, YMM_X(1)));
     tcg_gen_qemu_st_i128(t, a0_hi, mem_index, mop);
 }
+
+#ifdef XBOX
+/*
+ * The Xbox kernel idle loop (KiIdleLoop) never halts:
+ *
+ *     top:  sti; nop; nop; cli
+ *           cmp ebp, [ebp]             ; DPC queue empty?
+ *           je next
+ *           ...                        ; retire the DPCs
+ *     next: cmp dword [ebx + 2ch], 0   ; no thread ready?
+ *           je top
+ *
+ * STI always ends the TB, so an idle guest bounces between this loop and
+ * cpu_exec_loop and keeps a host core busy. Once in the loop, only an
+ * interrupt can queue a DPC or ready a thread on the single Xbox CPU, so this
+ * STI halts in helper_xbox_idle() while both are idle, until the next
+ * interrupt (the 1 kHz PIT at the latest). The kernel enters the loop with a
+ * thread already ready and the PIC still masked, hence the check.
+ * Only bytes on the TB's first page are matched: the look-ahead can neither
+ * fault nor add a page to the TB.
+ */
+/* Match code ending in a JE opcode; its rel8 must be on the same page too */
+static bool xbox_idle_match(CPUX86State *env, DisasContext *s,
+                            target_ulong pc, const uint8_t *code, int len)
+{
+    if (((s->base.pc_first ^ pc) | (s->base.pc_first ^ (pc + len))) &
+        TARGET_PAGE_MASK) {
+        return false;
+    }
+    for (int i = 0; i < len; i++) {
+        if (translator_ldub(env, &s->base, pc + i) != code[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool xbox_idle_follows(CPUX86State *env, DisasContext *s)
+{
+    static const uint8_t top[] = { 0x90, 0x90, 0xfa, 0x3b, 0x6d, 0x00, 0x74 };
+    static const uint8_t next[] = { 0x83, 0x7b, 0x2c, 0x00, 0x74 };
+    target_ulong pc = s->pc + sizeof(top);
+
+    if (CPL(s) != 0 || (s->flags & HF_TF_MASK) ||
+        (tb_cflags(s->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP)) ||
+        !xbox_idle_match(env, s, s->pc, top, sizeof(top))) {
+        return false;
+    }
+    pc += 1 + (int8_t)translator_ldub(env, &s->base, pc);
+    if (!xbox_idle_match(env, s, pc, next, sizeof(next))) {
+        return false;
+    }
+    pc += sizeof(next);
+    return pc + 1 + (int8_t)translator_ldub(env, &s->base, pc) == s->pc - 1;
+}
+#endif
 
 #include "emit.c.inc"
 
