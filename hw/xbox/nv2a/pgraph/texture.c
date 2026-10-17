@@ -23,6 +23,10 @@
 #include "texture.h"
 #include "util.h"
 
+#ifdef __aarch64__
+#include <arm_neon.h>
+#endif
+
 const BasicColorFormatInfo kelvin_color_format_info_map[66] = {
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_Y8] = { 1, false },
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_AY8] = { 1, false },
@@ -326,6 +330,76 @@ TextureShape pgraph_get_texture_shape(PGRAPHState *pg, int texture_idx)
     return shape;
 }
 
+/*
+ * One line of YUY2 (Y0 U Y1 V) or UYVY (U Y0 V Y1) to RGBA, with the same
+ * results as convert_yuy2_to_rgb() and convert_uyvy_to_rgb(). Video textures
+ * are converted again on every upload, sixteen pixels at a time with NEON.
+ */
+static void convert_yuv422_line(const uint8_t *line, uint8_t *pixel,
+                                unsigned int width, bool uyvy)
+{
+    unsigned int x = 0;
+
+#ifdef __aarch64__
+    const int16x8_t k128 = vdupq_n_s16(128);
+    const uint8x16_t alpha = vdupq_n_u8(255);
+
+    for (; x + 16 <= width; x += 16, pixel += 64) {
+        uint8x8x4_t in = vld4_u8(line + x * 2);
+        uint8x8_t y0 = uyvy ? in.val[1] : in.val[0];
+        uint8x8_t u = uyvy ? in.val[0] : in.val[1];
+        uint8x8_t y1 = uyvy ? in.val[3] : in.val[2];
+        uint8x8_t v = uyvy ? in.val[2] : in.val[3];
+        int16x8_t d = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u)), k128);
+        int16x8_t e = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v)), k128);
+        int16x8_t c0 = vreinterpretq_s16_u16(vsubl_u8(y0, vdup_n_u8(16)));
+        int16x8_t c1 = vreinterpretq_s16_u16(vsubl_u8(y1, vdup_n_u8(16)));
+        int32x4_t chroma[2][3];
+        uint8x8_t out[3][2];
+
+        for (int h = 0; h < 2; h++) {
+            int16x4_t dh = h ? vget_high_s16(d) : vget_low_s16(d);
+            int16x4_t eh = h ? vget_high_s16(e) : vget_low_s16(e);
+            chroma[h][0] = vmlal_n_s16(vdupq_n_s32(128), eh, 409);
+            chroma[h][1] = vmlal_n_s16(vmlal_n_s16(vdupq_n_s32(128), dh, -100),
+                                       eh, -208);
+            chroma[h][2] = vmlal_n_s16(vdupq_n_s32(128), dh, 516);
+        }
+        for (int k = 0; k < 2; k++) {
+            int16x8_t c = k ? c1 : c0;
+            int32x4_t luma[2] = {
+                vmull_n_s16(vget_low_s16(c), 298),
+                vmull_n_s16(vget_high_s16(c), 298),
+            };
+            for (int i = 0; i < 3; i++) {
+                uint16x4_t lo = vqmovun_s32(
+                    vshrq_n_s32(vaddq_s32(luma[0], chroma[0][i]), 8));
+                uint16x4_t hi = vqmovun_s32(
+                    vshrq_n_s32(vaddq_s32(luma[1], chroma[1][i]), 8));
+                out[i][k] = vqmovn_u16(vcombine_u16(lo, hi));
+            }
+        }
+        /* even pixels come from Y0, odd ones from Y1 */
+        uint8x16x4_t rgba;
+        for (int i = 0; i < 3; i++) {
+            uint8x8x2_t z = vzip_u8(out[i][0], out[i][1]);
+            rgba.val[i] = vcombine_u8(z.val[0], z.val[1]);
+        }
+        rgba.val[3] = alpha;
+        vst4q_u8(pixel, rgba);
+    }
+#endif
+
+    for (; x < width; x++, pixel += 4) {
+        if (uyvy) {
+            convert_uyvy_to_rgb(line, x, &pixel[0], &pixel[1], &pixel[2]);
+        } else {
+            convert_yuy2_to_rgb(line, x, &pixel[0], &pixel[1], &pixel[2]);
+        }
+        pixel[3] = 255;
+    }
+}
+
 uint8_t *pgraph_convert_texture_data(const TextureShape s, const uint8_t *data,
                                      const uint8_t *palette_data,
                                      unsigned int width, unsigned int height,
@@ -363,20 +437,11 @@ uint8_t *pgraph_convert_texture_data(const TextureShape s, const uint8_t *data,
         // conversion
         size = width * height * 4;
         converted_data = g_malloc(size);
-        uint8_t *pixel = converted_data;
         for (int y = 0; y < height; y++) {
-            const uint8_t *line = &data[y * row_pitch * depth];
-            for (int x = 0; x < width; x++, pixel += 4) {
-                if (s.color_format ==
-                    NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8) {
-                    convert_yuy2_to_rgb(line, x, &pixel[0], &pixel[1],
-                                        &pixel[2]);
-                } else {
-                    convert_uyvy_to_rgb(line, x, &pixel[0], &pixel[1],
-                                        &pixel[2]);
-                }
-                pixel[3] = 255;
-            }
+            convert_yuv422_line(&data[y * row_pitch * depth],
+                                &converted_data[y * width * 4], width,
+                                s.color_format !=
+                                NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8);
         }
     } else if (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5) {
         assert(depth == 1); /* FIXME */
