@@ -1015,43 +1015,29 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
       }
     }
 
-    fun addSingleButton(parent: LinearLayout, spec: MenuButtonSpec) {
-      parent.addView(createMenuButton(spec).apply {
-        layoutParams = LinearLayout.LayoutParams(
-          LinearLayout.LayoutParams.MATCH_PARENT,
-          LinearLayout.LayoutParams.WRAP_CONTENT
-        ).also { lp ->
-          lp.bottomMargin = verticalButtonSpacing
-        }
-      })
-    }
-
-    fun addButtonRow(parent: LinearLayout, left: MenuButtonSpec, right: MenuButtonSpec) {
+    fun addButtonRow(parent: LinearLayout, vararg specs: MenuButtonSpec) {
       parent.addView(
         LinearLayout(this).apply {
           orientation = LinearLayout.HORIZONTAL
+          // Keep buttons top-aligned when one label wraps to two lines.
+          isBaselineAligned = false
           layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
           ).also { lp ->
             lp.bottomMargin = verticalButtonSpacing
           }
-          addView(createMenuButton(left).apply {
-            layoutParams = LinearLayout.LayoutParams(
-              0,
-              LinearLayout.LayoutParams.WRAP_CONTENT,
-              1f
-            ).also { lp ->
-              lp.marginEnd = horizontalButtonSpacing
-            }
-          })
-          addView(createMenuButton(right).apply {
-            layoutParams = LinearLayout.LayoutParams(
-              0,
-              LinearLayout.LayoutParams.WRAP_CONTENT,
-              1f
-            )
-          })
+          specs.forEachIndexed { index, spec ->
+            addView(createMenuButton(spec).apply {
+              layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+              ).also { lp ->
+                if (index < specs.lastIndex) lp.marginEnd = horizontalButtonSpacing
+              }
+            })
+          }
         }
       )
     }
@@ -1119,12 +1105,10 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     val buttonList = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       setPadding((20 * dp).toInt(), (12 * dp).toInt(), (20 * dp).toInt(), 0)
-      addSingleButton(this, resumeButton)
-      addSingleButton(this, touchControlsButton)
+      addButtonRow(this, resumeButton, touchControlsButton)
       addButtonRow(this, remapButton, editTouchLayoutButton)
       addButtonRow(this, saveStateButton, loadStateButton)
-      addSingleButton(this, rebootButton)
-      addButtonRow(this, exitToLibraryButton, quitAppButton)
+      addButtonRow(this, rebootButton, exitToLibraryButton, quitAppButton)
     }
 
     val scrollContainer = NestedScrollView(this).apply {

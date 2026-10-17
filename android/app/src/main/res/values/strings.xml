@@ -399,11 +399,11 @@
   <string name="in_game_menu_restart_game">Restart Game</string>
   <string name="in_game_menu_show_touch_controls">Show Touch Controls</string>
   <string name="in_game_menu_hide_touch_controls">Hide Touch Controls</string>
-  <string name="in_game_menu_reboot_system">Reboot System</string>
+  <string name="in_game_menu_reboot_system">Reboot</string>
   <string name="in_game_menu_reboot_title">Reboot System</string>
   <string name="in_game_menu_reboot_message">Are you sure you want to reboot the emulated Xbox system?</string>
   <string name="in_game_menu_reboot_action">Reboot</string>
-  <string name="in_game_menu_exit_to_library">Exit to Game Library</string>
+  <string name="in_game_menu_exit_to_library">Exit to Library</string>
   <string name="in_game_menu_quit_app">Quit App</string>
   <string name="in_game_menu_save_state">Save State</string>
   <string name="in_game_menu_load_state">Load State</string>
