@@ -74,6 +74,8 @@ typedef struct VoiceWorkDispatch {
     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     VoiceWorkItem queue[MCPX_HW_MAX_VOICES];
     int queue_len;
+    int64_t work_us;     /* voice processing time of the workers this frame */
+    int64_t work_us_avg; /* per frame, workers or inline */
 } VoiceWorkDispatch;
 
 typedef struct {

@@ -1751,6 +1751,7 @@ static void *voice_worker_thread(void *arg)
 
         int64_t end_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         g_dbg.vp.workers[worker_id].time_us = end_time - start_time;
+        vwd->work_us += end_time - start_time;
 
         qemu_cond_wait(&vwd->work_pending, &vwd->lock);
     } while (!vwd->workers_should_exit);
@@ -1858,6 +1859,9 @@ static void voice_work_schedule(MCPXAPUState *d)
     }
 }
 
+/* A sixth of an APU frame */
+#define VP_INLINE_MAX_US (1000000 * NUM_SAMPLES_PER_FRAME / 48000 / 6)
+
 static void
 voice_work_dispatch(MCPXAPUState *d,
                     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
@@ -1869,7 +1873,15 @@ voice_work_dispatch(MCPXAPUState *d,
     qemu_mutex_lock(&vwd->lock);
 
     if (vwd->queue_len) {
-        if (vwd->num_workers == 1) {
+        /*
+         * Waking the workers costs more than the voices themselves until
+         * there are many: a frame lasts 32 samples, so the whole dispatch
+         * runs 1500 times a second. Process the voices here while they took
+         * under a sixth of the frame, the workers' threads stay asleep.
+         */
+        if (vwd->num_workers == 1 ||
+            vwd->work_us_avg < VP_INLINE_MAX_US) {
+            /* Idle workers never touch their buffers, borrow the first's */
             VoiceWorker *worker = &vwd->workers[0];
             int voice_count = vwd->queue_len;
 
@@ -1906,6 +1918,8 @@ voice_work_dispatch(MCPXAPUState *d,
             g_dbg.vp.workers[0].time_us =
                 qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_time;
             g_dbg.vp.total_worker_time_us = g_dbg.vp.workers[0].time_us;
+            vwd->work_us_avg +=
+                (g_dbg.vp.workers[0].time_us - vwd->work_us_avg) / 8;
             qemu_mutex_unlock(&vwd->lock);
             return;
         }
@@ -1913,11 +1927,13 @@ voice_work_dispatch(MCPXAPUState *d,
         memset(vwd->mixbins, 0, sizeof(vwd->mixbins));
 
         // Signal workers and wait for completion
+        vwd->work_us = 0;
         voice_work_schedule(d);
         qemu_cond_broadcast(&vwd->work_pending);
         qemu_cond_wait(&vwd->work_finished, &vwd->lock);
         assert(!vwd->workers_pending);
         vwd->queue_len = 0;
+        vwd->work_us_avg += (vwd->work_us - vwd->work_us_avg) / 8;
 
         // Add voice contributions
         for (int b = 0; b < NUM_MIXBINS; b++) {
