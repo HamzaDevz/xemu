@@ -1,0 +1,16 @@
+# XIII: boot and the first menus, to show an existing profile or save
+rom XIII.iso
+wait 25
+shot t25
+btn start 200
+wait 6
+shot t31
+btn a 200
+wait 6
+shot t37
+btn a 200
+wait 6
+shot t43
+btn a 200
+wait 6
+shot t49

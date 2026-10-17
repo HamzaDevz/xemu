@@ -1,0 +1,17 @@
+# Ninja Gaiden: skip to the title, open the menu and its second entry, to show an existing save
+rom Ninja Gaiden (Europe, Australia) (En,Ja,Fr,De,Es,It).xiso.iso
+wait 30
+btn start 200
+wait 6
+btn start 200
+wait 6
+shot title
+btn start 200
+wait 4
+shot menu
+btn down 200
+wait 2
+shot menu-down
+btn a 200
+wait 6
+shot load

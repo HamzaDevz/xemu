@@ -1,0 +1,8 @@
+# Conker: this image stops on the game's "disc is dirty or damaged" loading screen in every X1 BOX build, a
+# static picture that heated the Odin
+rom Conker - Live & Reloaded (Europe) (En,Ja,Fr,De,Es,It).xiso.iso
+wait 30
+measure conker-error
+wait 60
+end
+shot end

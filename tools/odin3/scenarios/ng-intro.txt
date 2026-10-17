@@ -1,0 +1,7 @@
+# Ninja Gaiden: boot logos then the in-engine intro, no input
+rom Ninja Gaiden (Europe, Australia) (En,Ja,Fr,De,Es,It).xiso.iso
+wait 15
+measure ng-intro
+wait 60
+end
+shot end

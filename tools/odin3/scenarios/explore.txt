@@ -1,0 +1,8 @@
+# Boot only, to learn the menus (KEEP=1 HOLD=1 SCENARIO=explore ./run.sh explore)
+rom Conker - Live & Reloaded (Europe) (En,Ja,Fr,De,Es,It).xiso.iso
+wait 20
+shot boot20
+wait 20
+shot boot40
+wait 20
+shot boot60
