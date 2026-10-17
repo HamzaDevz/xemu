@@ -2539,7 +2539,9 @@ illegal:
  * that is a TB branching back to its own start, with one load and no store,
  * writing no register it reads before writing it: every iteration computes
  * the same thing until that memory changes.  gen_Jcc() then waits for a store
- * to it in helper_xbox_poll() on the back edge instead of spinning.
+ * to it in helper_xbox_poll() on the back edge instead of spinning.  Without
+ * that load or a flag computed in the loop, or ending in a JMP, it never
+ * leaves before an interrupt: gen_xbox_loop_halt() halts there instead.
  */
 static void xbox_poll_insn(DisasContext *s, X86DecodedInsn *decode)
 {
@@ -2549,7 +2551,7 @@ static void xbox_poll_insn(DisasContext *s, X86DecodedInsn *decode)
     bool load = false;
     uint16_t read = 0, written = 0;
 
-    if (!s->poll_ok || gen == gen_Jcc) {
+    if (!s->poll_ok || gen == gen_Jcc || gen == gen_JMP) {
         return;
     }
     if ((!alu && gen != gen_MOV && gen != gen_LEA) ||

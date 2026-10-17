@@ -2388,6 +2388,27 @@ static void gen_IRET(DisasContext *s, X86DecodedInsn *decode)
     s->base.is_jmp = DISAS_EOB_ONLY;
 }
 
+#ifdef XBOX
+/* A branch to the start of a TB that repeats itself, see xbox_poll_insn() */
+static bool xbox_loop_back(DisasContext *s, X86DecodedInsn *decode)
+{
+    return s->poll_ok && !(s->poll_read & s->poll_written) &&
+           s->pc + decode->immediate == s->base.pc_first;
+}
+
+/* Halt at the loop's start, where the interrupt that wakes the CPU returns */
+static void gen_xbox_loop_halt(DisasContext *s)
+{
+    if (tb_cflags(s->base.tb) & CF_PCREL) {
+        tcg_gen_addi_tl(cpu_eip, cpu_eip, s->base.pc_first - s->pc_save);
+    } else {
+        tcg_gen_movi_tl(cpu_eip, (uint32_t)(s->base.pc_first - s->cs_base));
+    }
+    gen_helper_hlt(tcg_env);
+    s->base.is_jmp = DISAS_NORETURN;
+}
+#endif
+
 static void gen_Jcc(DisasContext *s, X86DecodedInsn *decode)
 {
     TCGLabel *taken = gen_new_label();
@@ -2395,15 +2416,19 @@ static void gen_Jcc(DisasContext *s, X86DecodedInsn *decode)
     gen_bnd_jmp(s);
     gen_jcc(s, decode->b & 0xf, taken);
 #ifdef XBOX
-    if (s->poll_ok && s->poll_addr && s->poll_flags &&
-        !(s->poll_read & s->poll_written) &&
-        s->pc + decode->immediate == s->base.pc_first) {
-        /* a polling loop, see xbox_poll_insn() */
+    if (xbox_loop_back(s, decode)) {
         gen_jmp_rel_csize(s, 0, 1);
         gen_set_label(taken);
-        gen_helper_xbox_poll(tcg_env, s->poll_addr, s->poll_val,
-                             tcg_constant_i32(s->poll_ot | s->mem_index << 4));
-        gen_jmp_rel(s, s->dflag, decode->immediate, 0);
+        if (s->poll_addr && s->poll_flags) {
+            /* a polling loop */
+            gen_helper_xbox_poll(tcg_env, s->poll_addr, s->poll_val,
+                                 tcg_constant_i32(s->poll_ot |
+                                                  s->mem_index << 4));
+            gen_jmp_rel(s, s->dflag, decode->immediate, 0);
+        } else {
+            /* the condition cannot change */
+            gen_xbox_loop_halt(s);
+        }
         return;
     }
 #endif
@@ -2422,6 +2447,12 @@ static void gen_JCXZ(DisasContext *s, X86DecodedInsn *decode)
 static void gen_JMP(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
+#ifdef XBOX
+    if (xbox_loop_back(s, decode)) {
+        gen_xbox_loop_halt(s);
+        return;
+    }
+#endif
     gen_jmp_rel(s, s->dflag, decode->immediate, 0);
 }
 
