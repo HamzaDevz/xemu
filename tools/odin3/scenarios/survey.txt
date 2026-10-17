@@ -1,0 +1,30 @@
+# Any game (ROM=<file> SCENARIO=survey TARGET=60 ./run.sh <name>): the boot and intro untouched, then Start/A
+# through the title screens into whatever the first choices lead to, A now and then to skip dialogs
+wait 20
+shot boot
+measure intro
+wait 40
+end
+shot intro
+wait 3
+btn a 200
+wait 3
+btn start 200
+wait 3
+btn a 200
+wait 3
+btn a 200
+wait 3
+btn a 200
+wait 8
+shot menus
+measure play
+wait 10
+btn a 200
+wait 10
+btn a 200
+wait 10
+btn a 200
+wait 10
+end
+shot play

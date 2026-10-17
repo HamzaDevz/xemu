@@ -105,8 +105,41 @@ def guest_fps():
     return f", guest {statistics.mean(vals):.1f} fps (min {min(vals):.0f})" if vals else ""
 
 
+def nv2a():
+    # Per-flip ms of the FIFO thread's phases (hakuX-phase) and finishes per flip by reason (xemu-work Fin:)
+    import re
+    phase, fin = {}, {}
+    try:
+        for line in open(os.path.join(d, "nv2a.log"), errors="replace"):
+            if "hakuX-phase:" in line:
+                for k, v in re.findall(r"(\w+):([\d.]+)", line.split("hakuX-phase:")[1]):
+                    phase.setdefault(k, []).append(float(v))
+            elif "xemu-work:" in line and " Fin:" in line:
+                for k, v in re.findall(r"([A-Za-z]+)(\d+)", line.split(" Fin:")[1]):
+                    fin.setdefault(k, []).append(float(v))
+    except FileNotFoundError:
+        return ""
+    if not phase:
+        return ""
+    m = {k: statistics.mean(v) for k, v in phase.items()}
+    keys = ["Surf", "Tex", "Shd", "Draw", "Syn", "Fin", "Fen", "Idle", "Tot"]
+    f = {k: statistics.mean(v) for k, v in fin.items()}
+    fins = " ".join(f"{k}{v:.1f}" for k, v in f.items() if v >= 0.05)
+    return "nv2a ms/flip " + " ".join(f"{k} {m[k]:.1f}" for k in keys if k in m) + (f", finishes/flip {fins}" if fins else "")
+
+
 print(f"[{os.path.basename(os.path.normpath(d))}] {frame_stats(presents())}{guest_fps()}")
 print(f"  {power()}")
 t = threads()
 if t:
     print(f"  {t}")
+n = nv2a()
+try:
+    # Last display mode the game set (run.sh keeps the xemu-mode lines in mode.log)
+    modes = [l.split("xemu-mode:")[1].strip() for l in open(os.path.join(d, "mode.log")) if "xemu-mode:" in l]
+    if modes:
+        n = (n + ", " if n else "") + modes[-1]
+except FileNotFoundError:
+    pass
+if n:
+    print(f"  {n}")
