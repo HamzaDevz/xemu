@@ -751,6 +751,11 @@ static inline bool x87_native_enabled(void)
     return likely(state >= 0) ? state : x87_native_init();
 }
 
+bool x87_native_translate(void)
+{
+    return x87_native_enabled();
+}
+
 /*
  * Round-to-nearest (bits 11:10 = 0) with precision control double (9:8 = 10)
  * or single (00)
@@ -1319,12 +1324,16 @@ static const int fcom_ccval[4] = {0x0100, 0x4000, 0x0000, 0x4500};
 
 void helper_fcom_ST0_FT0(CPUX86State *env)
 {
-    int old_flags = save_exception_flags(env);
     FloatRelation ret;
 
-    if (!X87_NATIVE_COMPARE(ST0, FT0, &ret)) {
-        ret = floatx80_compare(ST0, FT0, &env->fp_status);
+    if (X87_NATIVE_COMPARE(ST0, FT0, &ret)) {
+        /* No flag raised: all the merge below would do is this */
+        env->fpus = (env->fpus & ~0x4500) | fcom_ccval[ret + 1];
+        fpu_set_exception(env, 0);
+        return;
     }
+    int old_flags = save_exception_flags(env);
+    ret = floatx80_compare(ST0, FT0, &env->fp_status);
     env->fpus = (env->fpus & ~0x4500) | fcom_ccval[ret + 1];
     merge_exception_flags(env, old_flags);
 }
@@ -1428,6 +1437,78 @@ void helper_fdivr_ST0_FT0(CPUX86State *env)
     FPU_HELPER_COUNT();
     ST0 = helper_fdiv(env, FT0, ST0);
 }
+
+#ifndef USE_HARD_FPU
+/*
+ * fadd/fmul/fcom/fsub/fsubr/fdiv/fdivr with a float or double operand, in
+ * one call instead of a load into FT0 and then the operation. FT0 is only
+ * scratch, so the native path takes the operand as it comes; whatever it
+ * does not take runs the two original helpers in order.
+ */
+
+/* ST0 = ST0 op the operand f (rev: f op ST0); as x87_native_binop() */
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_binop_mem(CPUX86State *env, int op, bool rev, uint64_t f,
+                     int frac_bits)
+{
+    int mode = env->fpuc & X87N_FPUC_MASK;
+    double st0, m;
+    bool inexact;
+
+    if ((mode != X87N_FPUC_DOUBLE && mode != X87N_FPUC_SINGLE) ||
+        !x87_native_enabled() ||
+        !x87n_ieee_to_double(f, frac_bits, x87_native_prec_bits(env), &m) ||
+        !x87n_to_double(ST0.low, ST0.high, &st0) ||
+        !x87n_binop_dd(op, mode == X87N_FPUC_SINGLE, rev ? m : st0,
+                       rev ? st0 : m, &ST0.low, &ST0.high, &inexact)) {
+        return false;
+    }
+    /* Also all the load's own fpu_set_exception(env, 0) would have done */
+    x87_native_raise(env, inexact);
+    return true;
+}
+
+/* fcom of ST0 with the operand f; as helper_fcom_ST0_FT0()'s native path */
+static inline QEMU_ALWAYS_INLINE bool
+x87_native_fcom_mem(CPUX86State *env, uint64_t f, int frac_bits)
+{
+    floatx80 m;
+    FloatRelation ret;
+
+    if (!x87_native_load(env, f, frac_bits, frac_bits == 23 ? 127 : 1023,
+                         &m) ||
+        !X87_NATIVE_COMPARE(ST0, m, &ret)) {
+        return false;
+    }
+    env->fpus = (env->fpus & ~0x4500) | fcom_ccval[ret + 1];
+    fpu_set_exception(env, 0);
+    return true;
+}
+
+#define X87_MEM_OP(name, sfx, type, fb, ft0_load, native_op)                 \
+void helper_##name##_ST0_##sfx(CPUX86State *env, type val)                  \
+{                                                                           \
+    const int frac_bits = fb;                                               \
+                                                                            \
+    if (native_op) {                                                        \
+        return;                                                             \
+    }                                                                       \
+    ft0_load(env, val);                                                     \
+    helper_##name##_ST0_FT0(env);                                           \
+}
+
+#define X87_MEM_OPS(name, native_op)                                         \
+    X87_MEM_OP(name, m32, uint32_t, 23, helper_flds_FT0, native_op)          \
+    X87_MEM_OP(name, m64, uint64_t, 52, helper_fldl_FT0, native_op)
+
+X87_MEM_OPS(fadd, x87_native_binop_mem(env, X87N_ADD, false, val, frac_bits))
+X87_MEM_OPS(fmul, x87_native_binop_mem(env, X87N_MUL, false, val, frac_bits))
+X87_MEM_OPS(fcom, x87_native_fcom_mem(env, val, frac_bits))
+X87_MEM_OPS(fsub, x87_native_binop_mem(env, X87N_SUB, false, val, frac_bits))
+X87_MEM_OPS(fsubr, x87_native_binop_mem(env, X87N_SUB, true, val, frac_bits))
+X87_MEM_OPS(fdiv, x87_native_binop_mem(env, X87N_DIV, false, val, frac_bits))
+X87_MEM_OPS(fdivr, x87_native_binop_mem(env, X87N_DIV, true, val, frac_bits))
+#endif
 
 /* fp operations between STN and ST0 */
 

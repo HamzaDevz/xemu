@@ -40,6 +40,12 @@
 #include <string.h>
 #include <math.h>
 
+/*
+ * Everything is inlined into the helpers: op is then a constant, and the
+ * out-parameters stay in registers instead of a stack frame per operation.
+ */
+#define X87N_INLINE static inline __attribute__((always_inline))
+
 /* No contraction: the error terms below rely on separately rounded steps. */
 #ifdef __clang__
 #pragma STDC FP_CONTRACT OFF
@@ -66,7 +72,7 @@ enum {
  * discarded bits left-aligned in rem: above a half, or a half with lsb odd.
  * Computed as a carry, since a branch on rem mispredicts on real data.
  */
-static inline bool x87n_round_nearest(uint64_t rem, uint64_t lsb)
+X87N_INLINE bool x87n_round_nearest(uint64_t rem, uint64_t lsb)
 {
     uint64_t sum;
 
@@ -82,7 +88,7 @@ static inline bool x87n_round_nearest(uint64_t rem, uint64_t lsb)
  * as it is (the range checks around it still apply), and a carry out of the
  * significand moves into it as it should.
  */
-static inline double x87n_round_single(double r, int dir, bool *inexact)
+X87N_INLINE double x87n_round_single(double r, int dir, bool *inexact)
 {
     uint64_t bits;
     memcpy(&bits, &r, sizeof(bits));
@@ -97,7 +103,7 @@ static inline double x87n_round_single(double r, int dir, bool *inexact)
 }
 
 /* An extended value as a double, if it is exactly one (and in range). */
-static inline bool x87n_to_double(uint64_t low, uint16_t high, double *out)
+X87N_INLINE bool x87n_to_double(uint64_t low, uint16_t high, double *out)
 {
     uint32_t exp = high & 0x7fff;
     uint64_t sign = (uint64_t)(high >> 15) << 63;
@@ -122,7 +128,7 @@ static inline bool x87n_to_double(uint64_t low, uint16_t high, double *out)
 }
 
 /* A double result as an extended value, if it is zero or in range. */
-static inline bool x87n_from_double(double r, uint64_t *low, uint16_t *high)
+X87N_INLINE bool x87n_from_double(double r, uint64_t *low, uint16_t *high)
 {
     uint64_t bits;
     memcpy(&bits, &r, sizeof(bits));
@@ -151,7 +157,7 @@ static inline bool x87n_from_double(double r, uint64_t *low, uint16_t *high)
  * rounded to single first if asked. The range is checked on r itself too, as
  * rounding a subnormal could make it look like an exact zero.
  */
-static inline bool x87n_result(double r, bool inexact_r, bool single, int dir,
+X87N_INLINE bool x87n_result(double r, bool inexact_r, bool single, int dir,
                                uint64_t *r_low, uint16_t *r_high, bool *inexact)
 {
     uint64_t low;
@@ -171,22 +177,16 @@ static inline bool x87n_result(double r, bool inexact_r, bool single, int dir,
 }
 
 /*
- * a op b at double precision (single: at single precision), round-to-nearest.
- * Returns false (and writes nothing) when the result might differ from the
- * x87's; *inexact is the PE flag otherwise.
+ * a op b at double precision (single: at single precision), round-to-nearest,
+ * for operands that are exactly what x87n_to_double() gives. Returns false
+ * (and writes nothing) when the result might differ from the x87's;
+ * *inexact is the PE flag otherwise.
  */
-static inline bool x87n_binop(int op, bool single,
-                              uint64_t a_low, uint16_t a_high,
-                              uint64_t b_low, uint16_t b_high,
+X87N_INLINE bool x87n_binop_dd(int op, bool single, double a, double b,
                               uint64_t *r_low, uint16_t *r_high, bool *inexact)
 {
-    double a, b, r, err;
+    double r, err;
     int dir;
-
-    if (!x87n_to_double(a_low, a_high, &a) ||
-        !x87n_to_double(b_low, b_high, &b)) {
-        return false;
-    }
 
     switch (op) {
     case X87N_ADD:
@@ -232,8 +232,21 @@ static inline bool x87n_binop(int op, bool single,
     return x87n_result(r, err != 0.0, single, dir, r_low, r_high, inexact);
 }
 
+/* As x87n_binop_dd(), on extended operands */
+X87N_INLINE bool x87n_binop(int op, bool single,
+                            uint64_t a_low, uint16_t a_high,
+                            uint64_t b_low, uint16_t b_high,
+                            uint64_t *r_low, uint16_t *r_high, bool *inexact)
+{
+    double a, b;
+
+    return x87n_to_double(a_low, a_high, &a) &&
+           x87n_to_double(b_low, b_high, &b) &&
+           x87n_binop_dd(op, single, a, b, r_low, r_high, inexact);
+}
+
 /* sqrt(a) at double (or single) precision, round-to-nearest; as x87n_binop. */
-static inline bool x87n_sqrt(bool single, uint64_t a_low, uint16_t a_high,
+X87N_INLINE bool x87n_sqrt(bool single, uint64_t a_low, uint16_t a_high,
                              uint64_t *r_low, uint16_t *r_high, bool *inexact)
 {
     double a, r;
@@ -256,7 +269,7 @@ static inline bool x87n_sqrt(bool single, uint64_t a_low, uint16_t a_high,
  */
 
 /* A zero or a normal finite number. */
-static inline bool x87n_ordinary(uint64_t low, uint16_t high, uint32_t *exp)
+X87N_INLINE bool x87n_ordinary(uint64_t low, uint16_t high, uint32_t *exp)
 {
     *exp = high & 0x7fff;
     if (*exp == 0) {
@@ -269,7 +282,7 @@ static inline bool x87n_ordinary(uint64_t low, uint16_t high, uint32_t *exp)
  * a compared with b: -1 less, 0 equal, 1 greater (softfloat's FloatRelation).
  * No exception is possible for these operands, signalling or quiet.
  */
-static inline bool x87n_compare(uint64_t a_low, uint16_t a_high,
+X87N_INLINE bool x87n_compare(uint64_t a_low, uint16_t a_high,
                                 uint64_t b_low, uint16_t b_high, int *rel)
 {
     uint32_t ea, eb;
@@ -307,7 +320,7 @@ enum {                                  /* x87 RC, FPUC bits 11:10 */
  * a rounded to an integer by rc, if |a| < 2^62 (so any int64 result fits
  * after rounding); *inexact if a had a fractional part.
  */
-static inline bool x87n_to_int64(uint64_t low, uint16_t high, int rc,
+X87N_INLINE bool x87n_to_int64(uint64_t low, uint16_t high, int rc,
                                  int64_t *out, bool *inexact)
 {
     uint32_t exp;
@@ -370,7 +383,7 @@ static inline bool x87n_to_int64(uint64_t low, uint16_t high, int rc,
  */
 
 /* Whether a significand fits in prec_bits, so precision rounding is exact */
-static inline bool x87n_fits(uint64_t low, int prec_bits)
+X87N_INLINE bool x87n_fits(uint64_t low, int prec_bits)
 {
     return prec_bits >= 64 || !(low << prec_bits);
 }
@@ -379,7 +392,7 @@ static inline bool x87n_fits(uint64_t low, int prec_bits)
  * An IEEE single (frac_bits 23, bias 127) or double (52, 1023) as an
  * extended value.
  */
-static inline bool x87n_from_ieee(uint64_t f, int frac_bits, int bias,
+X87N_INLINE bool x87n_from_ieee(uint64_t f, int frac_bits, int bias,
                                   int prec_bits, uint64_t *low, uint16_t *high)
 {
     int exp_bits = frac_bits == 23 ? 8 : 11;
@@ -403,8 +416,46 @@ static inline bool x87n_from_ieee(uint64_t f, int frac_bits, int bias,
     return x87n_fits(*low, prec_bits);
 }
 
+/*
+ * An IEEE single (frac_bits 23) or double (52) operand straight as a double,
+ * where x87n_from_ieee() and then x87n_to_double() would both take it: the
+ * same double, without the extended value in between.
+ */
+X87N_INLINE bool x87n_ieee_to_double(uint64_t f, int frac_bits, int prec_bits,
+                                     double *out)
+{
+    if (frac_bits == 23) {
+        uint32_t bits = (uint32_t)f;
+        uint32_t exp = (bits >> 23) & 0xff;
+        float s;
+
+        if (exp == 0xff || (exp == 0 && (bits & 0x7fffff))) {
+            return false;               /* infinity, NaN or denormal */
+        }
+        memcpy(&s, &bits, sizeof(s));
+        *out = s;                       /* exact; 24 bits fit any precision */
+        return true;
+    }
+
+    uint32_t exp = (f >> 52) & 0x7ff;
+    uint64_t frac = f & X87N_FRAC_MASK;
+    if (exp == 0) {
+        if (frac) {
+            return false;               /* denormal */
+        }
+    } else {
+        int e = (int)exp - 1023;        /* infinity and NaN are out of range */
+        if (e < -X87N_EXP_LIMIT || e > X87N_EXP_LIMIT ||
+            !x87n_fits((1ull << 63) | (frac << 11), prec_bits)) {
+            return false;
+        }
+    }
+    memcpy(out, &f, sizeof(*out));
+    return true;
+}
+
 /* An integer as an extended value (exact at 64 bits) */
-static inline bool x87n_from_int64(int64_t v, int prec_bits,
+X87N_INLINE bool x87n_from_int64(int64_t v, int prec_bits,
                                    uint64_t *low, uint16_t *high)
 {
     uint64_t mag = v < 0 ? -(uint64_t)v : (uint64_t)v;
@@ -424,7 +475,7 @@ static inline bool x87n_from_int64(int64_t v, int prec_bits,
  * An extended value rounded by rc to an IEEE single or double; false when
  * the result would be subnormal, tiny or overflow.
  */
-static inline bool x87n_to_ieee(uint64_t low, uint16_t high, int rc,
+X87N_INLINE bool x87n_to_ieee(uint64_t low, uint16_t high, int rc,
                                 int frac_bits, int bias,
                                 uint64_t *out, bool *inexact)
 {

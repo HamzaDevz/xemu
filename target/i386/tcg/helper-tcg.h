@@ -112,6 +112,9 @@ void handle_even_inj(CPUX86State *env, int intno, int is_int,
                      int error_code, int is_hw, int rm);
 int exception_has_error_code(int intno);
 
+/* fpu_helper.c: whether x87 operations may take the host FPU fast paths */
+bool x87_native_translate(void);
+
 /* smm_helper.c */
 void do_smm_enter(X86CPU *cpu);
 

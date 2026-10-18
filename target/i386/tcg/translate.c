@@ -1147,9 +1147,36 @@ static CCPrepare gen_prepare_eflags_c(DisasContext *s, TCGv reg)
 /* compute eflags.P, trying to store it in reg if not NULL */
 static CCPrepare gen_prepare_eflags_p(DisasContext *s, TCGv reg)
 {
-    gen_compute_eflags(s);
-    return (CCPrepare) { .cond = TCG_COND_TSTNE, .reg = cpu_cc_src,
-                         .imm = CC_P };
+    switch (s->cc_op) {
+    case CC_OP_MULB ... CC_OP_MULQ:
+    case CC_OP_ADDB ... CC_OP_ADDQ:
+    case CC_OP_ADCB ... CC_OP_ADCQ:
+    case CC_OP_SUBB ... CC_OP_SUBQ:
+    case CC_OP_SBBB ... CC_OP_SBBQ:
+    case CC_OP_LOGICB ... CC_OP_LOGICQ:
+    case CC_OP_INCB ... CC_OP_INCQ:
+    case CC_OP_DECB ... CC_OP_DECQ:
+    case CC_OP_SHLB ... CC_OP_SHLQ:
+    case CC_OP_SARB ... CC_OP_SARQ:
+        /*
+         * PF is the even parity of the result's low byte: fold the byte
+         * into a nibble and look its odd parity up in 0x6996.  x87 code
+         * branches on "fnstsw ax; test ah, imm; jp" all the time, and the
+         * full flags helper cost far more.
+         */
+        if (!reg) {
+            reg = tcg_temp_new();
+        }
+        tcg_gen_shri_tl(reg, cpu_cc_dst, 4);
+        tcg_gen_xor_tl(reg, reg, cpu_cc_dst);
+        tcg_gen_andi_tl(reg, reg, 0xf);
+        tcg_gen_shr_tl(reg, tcg_constant_tl(0x6996), reg);
+        return (CCPrepare) { .cond = TCG_COND_TSTEQ, .reg = reg, .imm = 1 };
+    default:
+        gen_compute_eflags(s);
+        return (CCPrepare) { .cond = TCG_COND_TSTNE, .reg = cpu_cc_src,
+                             .imm = CC_P };
+    }
 }
 
 /* compute eflags.S, trying to store it in reg if not NULL */
@@ -1962,27 +1989,31 @@ static void gen_flush_fp(DisasContext *s)
             return; \
         }} while(0)
 
+/*
+ * Push and pop are inline on every path: helper_fpush() and helper_fpop()
+ * do no more than this, and a call costs far more than the work.
+ */
 static void gen_fpush(DisasContext *s)
 {
-    GEN_HELPER_FALLBACK_v_v(fpush, BISECT_GRP_STACK);
-
     tcg_gen_subi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
     gen_set_fptag(0, 0); /* validate stack entry */
 
-    s->fpstt_delta -= 1;
+    if (g_use_fp_jit && HARD_FPU_HAS_TCG_FP_OPS && BISECT_GRP_STACK) {
+        s->fpstt_delta -= 1;
+    }
 }
 
 static void gen_fpop(DisasContext *s)
 {
-    GEN_HELPER_FALLBACK_v_v(fpop, BISECT_GRP_STACK);
-
     gen_set_fptag(0, 1); /* invalidate stack entry */
     tcg_gen_addi_i32(fpstt, fpstt, 1);
     tcg_gen_andi_i32(fpstt, fpstt, 7);
 
-    fp_pc_wrapper(gen_fpop)(s);
-    s->fpstt_delta += 1;
+    if (g_use_fp_jit && HARD_FPU_HAS_TCG_FP_OPS && BISECT_GRP_STACK) {
+        fp_pc_wrapper(gen_fpop)(s);
+        s->fpstt_delta += 1;
+    }
 }
 
 static void gen_fmov_FT0_STN(DisasContext *s, int st_index)
@@ -2061,8 +2092,102 @@ static void gen_flds_FT0(DisasContext *s, TCGv_i32 arg)
     fp_pc_wrapper(gen_flds_FT0)(s, arg);
 }
 
+/*
+ * fld and fst(p) of a single or double are inline where the helpers' native
+ * path is a plain move of bits: a normal operand that the destination holds
+ * exactly, with no exception pending that FPUC leaves unmasked (the helpers
+ * would then set FPUS.SE and B).  Anything else branches to @slow, the
+ * helper call.  frac_bits is 23 or 52.
+ */
+static bool gen_x87_ieee_inline(void)
+{
+    return (!g_use_fp_jit || !HARD_FPU_HAS_TCG_FP_OPS) &&
+           x87_native_translate();
+}
+
+static void gen_x87_unmasked_pending(TCGLabel *slow)
+{
+    TCGv_i32 us = tcg_temp_new_i32();
+    TCGv_i32 uc = tcg_temp_new_i32();
+
+    tcg_gen_ld16u_i32(us, tcg_env, offsetof(CPUX86State, fpus));
+    tcg_gen_ld16u_i32(uc, tcg_env, offsetof(CPUX86State, fpuc));
+    tcg_gen_andc_i32(us, us, uc);
+    tcg_gen_brcondi_i32(TCG_COND_TSTNE, us, 0x3f, slow);
+}
+
+static void gen_fld_ieee_ST0(DisasContext *s, TCGv_i64 val, int frac_bits,
+                             TCGLabel *slow)
+{
+    int exp_bits = frac_bits == 23 ? 8 : 11;
+    int bias = (1 << (exp_bits - 1)) - 1;
+    TCGv_i64 exp = tcg_temp_new_i64();
+    TCGv_i64 t = tcg_temp_new_i64();
+    TCGv_i64 low = tcg_temp_new_i64();
+    TCGv_ptr p;
+
+    gen_x87_unmasked_pending(slow);
+    tcg_gen_extract_i64(exp, val, frac_bits, exp_bits);
+    tcg_gen_subi_i64(t, exp, 1);
+    /* Zero, denormals, infinities and NaNs */
+    tcg_gen_brcondi_i64(TCG_COND_GTU, t, (1 << exp_bits) - 3, slow);
+
+    tcg_gen_addi_i64(exp, exp, 16383 - bias);
+    tcg_gen_shri_i64(t, val, frac_bits + exp_bits - 15);
+    tcg_gen_andi_i64(t, t, 0x8000);
+    tcg_gen_or_i64(exp, exp, t);
+    tcg_gen_shli_i64(low, val, 63 - frac_bits);
+    tcg_gen_ori_i64(low, low, INT64_MIN);
+
+    gen_fpush(s);
+    p = gen_stn_ptr(0);
+    tcg_gen_st_i64(low, p, offsetof(floatx80, low));
+    tcg_gen_st16_i64(exp, p, offsetof(floatx80, high));
+}
+
+static void gen_fst_ieee_ST0(TCGv_i64 out, int frac_bits, TCGLabel *slow)
+{
+    int exp_bits = frac_bits == 23 ? 8 : 11;
+    int bias = (1 << (exp_bits - 1)) - 1;
+    TCGv_ptr p = gen_stn_ptr(0);
+    TCGv_i64 high = tcg_temp_new_i64();
+    TCGv_i64 low = tcg_temp_new_i64();
+    TCGv_i64 t = tcg_temp_new_i64();
+
+    gen_x87_unmasked_pending(slow);
+    tcg_gen_ld16u_i64(high, p, offsetof(floatx80, high));
+    tcg_gen_ld_i64(low, p, offsetof(floatx80, low));
+    /* The biased IEEE exponent less one, which must be 0 .. max - 2 */
+    tcg_gen_andi_i64(t, high, 0x7fff);
+    tcg_gen_subi_i64(t, t, 16383 - bias + 1);
+    tcg_gen_brcondi_i64(TCG_COND_GTU, t, (1 << exp_bits) - 3, slow);
+    tcg_gen_addi_i64(t, t, 1);
+    tcg_gen_shli_i64(t, t, frac_bits);
+    /* Integer bit set and nothing below the destination's precision */
+    tcg_gen_andi_i64(out, low, INT64_MIN | MAKE_64BIT_MASK(0, 63 - frac_bits));
+    tcg_gen_brcondi_i64(TCG_COND_NE, out, INT64_MIN, slow);
+
+    tcg_gen_extract_i64(out, low, 63 - frac_bits, frac_bits);
+    tcg_gen_or_i64(out, out, t);
+    tcg_gen_shri_i64(t, high, 15);
+    tcg_gen_shli_i64(t, t, frac_bits + exp_bits);
+    tcg_gen_or_i64(out, out, t);
+}
+
 static void gen_flds_ST0(DisasContext *s, TCGv_i32 arg)
 {
+    if (gen_x87_ieee_inline()) {
+        TCGLabel *slow = gen_new_label(), *done = gen_new_label();
+        TCGv_i64 v = tcg_temp_new_i64();
+
+        tcg_gen_extu_i32_i64(v, arg);
+        gen_fld_ieee_ST0(s, v, 23, slow);
+        tcg_gen_br(done);
+        gen_set_label(slow);
+        gen_helper_flds_ST0(tcg_env, arg);
+        gen_set_label(done);
+        return;
+    }
     GEN_HELPER_FALLBACK_v_T(flds_ST0, arg, BISECT_GRP_LOAD_ST);
     gen_fpush(s);
     fp_pc_wrapper(gen_flds_ST0)(s, arg);
@@ -2076,6 +2201,16 @@ static void gen_fldl_FT0(DisasContext *s, TCGv_i64 arg)
 
 static void gen_fldl_ST0(DisasContext *s, TCGv_i64 arg)
 {
+    if (gen_x87_ieee_inline()) {
+        TCGLabel *slow = gen_new_label(), *done = gen_new_label();
+
+        gen_fld_ieee_ST0(s, arg, 52, slow);
+        tcg_gen_br(done);
+        gen_set_label(slow);
+        gen_helper_fldl_ST0(tcg_env, arg);
+        gen_set_label(done);
+        return;
+    }
     GEN_HELPER_FALLBACK_v_T(fldl_ST0, arg, BISECT_GRP_LOAD_ST);
     gen_fpush(s);
     fp_pc_wrapper(gen_fldl_ST0)(s, arg);
@@ -2103,12 +2238,34 @@ static void gen_fildll_ST0(DisasContext *s, TCGv_i64 arg)
 
 static void gen_fsts_ST0(DisasContext *s, TCGv_i32 arg)
 {
+    if (gen_x87_ieee_inline()) {
+        TCGLabel *slow = gen_new_label(), *done = gen_new_label();
+        TCGv_i64 v = tcg_temp_new_i64();
+
+        gen_fst_ieee_ST0(v, 23, slow);
+        tcg_gen_extrl_i64_i32(arg, v);
+        tcg_gen_br(done);
+        gen_set_label(slow);
+        gen_helper_fsts_ST0(arg, tcg_env);
+        gen_set_label(done);
+        return;
+    }
     GEN_HELPER_FALLBACK_T_v(fsts_ST0, arg, BISECT_GRP_STORE);
     fp_pc_wrapper(gen_fsts_ST0)(s, arg);
 }
 
 static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
 {
+    if (gen_x87_ieee_inline()) {
+        TCGLabel *slow = gen_new_label(), *done = gen_new_label();
+
+        gen_fst_ieee_ST0(arg, 52, slow);
+        tcg_gen_br(done);
+        gen_set_label(slow);
+        gen_helper_fstl_ST0(arg, tcg_env);
+        gen_set_label(done);
+        return;
+    }
     GEN_HELPER_FALLBACK_T_v(fstl_ST0, arg, BISECT_GRP_STORE);
     fp_pc_wrapper(gen_fstl_ST0)(s, arg);
 }
@@ -2217,6 +2374,38 @@ static void gen_helper_fp_arith_ST0_FT0(DisasContext *s, int op)
 static void gen_fcom_ST0_FT0(DisasContext *s)
 {
     gen_helper_fp_arith_ST0_FT0(s, 2);
+}
+
+/*
+ * ST0 op= a float (val32) or double (val64) memory operand, with one helper
+ * for the load and the operation; op as for fp_arith_ST0_FT0. False on the
+ * inline FP path, where the caller loads FT0 and operates on it.
+ */
+static bool gen_fp_arith_ST0_mem(DisasContext *s, int op,
+                                 TCGv_i32 val32, TCGv_i64 val64)
+{
+    static void (* const gen_m32[8])(TCGv_ptr, TCGv_i32) = {
+        gen_helper_fadd_ST0_m32, gen_helper_fmul_ST0_m32,
+        gen_helper_fcom_ST0_m32, gen_helper_fcom_ST0_m32,
+        gen_helper_fsub_ST0_m32, gen_helper_fsubr_ST0_m32,
+        gen_helper_fdiv_ST0_m32, gen_helper_fdivr_ST0_m32,
+    };
+    static void (* const gen_m64[8])(TCGv_ptr, TCGv_i64) = {
+        gen_helper_fadd_ST0_m64, gen_helper_fmul_ST0_m64,
+        gen_helper_fcom_ST0_m64, gen_helper_fcom_ST0_m64,
+        gen_helper_fsub_ST0_m64, gen_helper_fsubr_ST0_m64,
+        gen_helper_fdiv_ST0_m64, gen_helper_fdivr_ST0_m64,
+    };
+
+    if (g_use_fp_jit && HARD_FPU_HAS_TCG_FP_OPS) {
+        return false;
+    }
+    if (val64) {
+        gen_m64[op](tcg_env, val64);
+    } else {
+        gen_m32[op](tcg_env, val32);
+    }
+    return true;
 }
 
 /* NOTE the exception in "r" op ordering */
@@ -3327,27 +3516,34 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                 case 0:
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
-                    gen_flds_FT0(s, s->tmp2_i32);
+                    if (!gen_fp_arith_ST0_mem(s, op1, s->tmp2_i32, NULL)) {
+                        gen_flds_FT0(s, s->tmp2_i32);
+                        gen_helper_fp_arith_ST0_FT0(s, op1);
+                    }
                     break;
                 case 1:
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LEUL);
                     gen_fildl_FT0(s, s->tmp2_i32);
+                    gen_helper_fp_arith_ST0_FT0(s, op1);
                     break;
                 case 2:
                     tcg_gen_qemu_ld_i64(s->tmp1_i64, s->A0,
                                         s->mem_index, MO_LEUQ);
-                    gen_fldl_FT0(s, s->tmp1_i64);
+                    if (!gen_fp_arith_ST0_mem(s, op1, NULL, s->tmp1_i64)) {
+                        gen_fldl_FT0(s, s->tmp1_i64);
+                        gen_helper_fp_arith_ST0_FT0(s, op1);
+                    }
                     break;
                 case 3:
                 default:
                     tcg_gen_qemu_ld_i32(s->tmp2_i32, s->A0,
                                         s->mem_index, MO_LESW);
                     gen_fildl_FT0(s, s->tmp2_i32);
+                    gen_helper_fp_arith_ST0_FT0(s, op1);
                     break;
                 }
 
-                gen_helper_fp_arith_ST0_FT0(s, op1);
                 if (op1 == 3) {
                     /* fcomp needs pop */
                     gen_fpop(s);
