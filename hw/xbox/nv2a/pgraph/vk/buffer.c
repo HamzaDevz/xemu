@@ -530,6 +530,13 @@ bool pgraph_vk_init_buffers(NV2AState *d, Error **errp)
         return false;
     }
     bitmap_clear(r->cb_vertex_pages, 0, r->bitmap_size);
+    r->cb_shadow_pages = bitmap_new(r->bitmap_size);
+    if (!r->cb_shadow_pages) {
+        error_setg(errp, "Failed to allocate vertex RAM page bitmap");
+        return false;
+    }
+    bitmap_clear(r->cb_shadow_pages, 0, r->bitmap_size);
+    r->num_cb_shadow_pages = 0;
     r->vertex_ram_flush_min = VK_WHOLE_SIZE;
     r->vertex_ram_flush_max = 0;
 
@@ -744,6 +751,8 @@ fail:
     }
     g_free(r->cb_vertex_pages);
     r->cb_vertex_pages = NULL;
+    g_free(r->cb_shadow_pages);
+    r->cb_shadow_pages = NULL;
     r->bitmap_size = 0;
     return false;
 }
@@ -783,6 +792,8 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
 
     g_free(r->cb_vertex_pages);
     r->cb_vertex_pages = NULL;
+    g_free(r->cb_shadow_pages);
+    r->cb_shadow_pages = NULL;
 }
 
 bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,

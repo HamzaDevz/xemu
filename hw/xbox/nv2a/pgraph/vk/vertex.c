@@ -62,16 +62,37 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
      * earlier draw pick up the later draw's vertices at submission time.
      *
      * The per-frame buffer only isolates frames from each other; it does not
-     * help within a command buffer. Submit what is already recorded before
-     * overwriting a page any of it reads.
+     * help within a command buffer. Submitting what is already recorded and
+     * waiting for the GPU before every such overwrite cost Metal Slug 3 about
+     * 10 ms a frame. Instead, a page this command buffer has already uploaded
+     * is left as the recorded draws see it when the guest has changed it:
+     * later draws reading it copy their attributes from guest RAM (see
+     * remap_unaligned_attributes), and it is uploaded again after submission.
      */
-    if (find_next_bit(r->cb_vertex_pages, end_bit, start_bit) < end_bit) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
-    }
-
     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
     StorageBuffer *vram = get_staging_buffer(r, BUFFER_VERTEX_RAM);
-    memcpy(vram->mapped + offset, data, size);
+    if (find_next_bit(r->cb_vertex_pages, end_bit, start_bit) < end_bit) {
+        const uint8_t *src = data;
+        hwaddr pos = offset, limit = offset + size;
+        while (pos < limit) {
+            size_t bit = pos / TARGET_PAGE_SIZE;
+            hwaddr page_end = MIN((hwaddr)(bit + 1) * TARGET_PAGE_SIZE, limit);
+            size_t len = page_end - pos;
+            uint8_t *dst = vram->mapped + pos;
+            if (!test_bit(bit, r->cb_vertex_pages)) {
+                memcpy(dst, src, len);
+            } else if (!test_bit(bit, r->cb_shadow_pages) &&
+                       memcmp(dst, src, len)) {
+                set_bit(bit, r->cb_shadow_pages);
+                r->num_cb_shadow_pages++;
+                nv2a_profile_inc_counter(NV2A_PROF_VERTEX_RAM_SHADOW);
+            }
+            src += len;
+            pos = page_end;
+        }
+    } else {
+        memcpy(vram->mapped + offset, data, size);
+    }
 
     FrameStagingState *fs = &r->frame_staging[r->current_frame];
     if (offset < fs->vertex_ram_flush_min) {

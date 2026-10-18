@@ -1242,6 +1242,12 @@ typedef struct PGRAPHVkState {
      * buffer started recording. Draws already recorded read from those pages,
      * so overwriting one before submission would retroactively change them. */
     unsigned long *cb_vertex_pages;
+    /* Pages of cb_vertex_pages the guest has rewritten since. The RAM buffer
+     * keeps what the recorded draws read, later draws of this command buffer
+     * take their attributes straight from guest RAM, and the new contents are
+     * uploaded once the command buffer is submitted. */
+    unsigned long *cb_shadow_pages;
+    size_t num_cb_shadow_pages;
     size_t bitmap_size;
 
     uint32_t last_vertex_attr_gen;

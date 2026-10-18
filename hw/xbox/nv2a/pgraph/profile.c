@@ -429,7 +429,7 @@ void nv2a_profile_get_workload_str(char *buf, int bufsize)
              "BE:%d DA:%d IE:%d IB:%d IA:%d Clr:%d "
              "QS:%d/%d PGen:%d PBnd:%d PNd:%d RP:%d "
              "SGen:%d SBnd:%d SNd:%d UBOd:%d UBOn:%d "
-             "TexU:%d GBU:%d/%d/%d/%d/%d "
+             "TexU:%d GBU:%d/%d/%d/%d/%d Shw:%d "
              "Fin:Vbd%d Sc%d Sd%d Bs%d Fbd%d Pr%d Fl%d Flu%d St%d",
              c[NV2A_PROF_BEGIN_ENDS],
              c[NV2A_PROF_DRAW_ARRAYS],
@@ -454,6 +454,7 @@ void nv2a_profile_get_workload_str(char *buf, int bufsize)
              c[NV2A_PROF_GEOM_BUFFER_UPDATE_3],
              c[NV2A_PROF_GEOM_BUFFER_UPDATE_4],
              c[NV2A_PROF_GEOM_BUFFER_UPDATE_4_NOTDIRTY],
+             c[NV2A_PROF_VERTEX_RAM_SHADOW],
              c[NV2A_PROF_FINISH_VERTEX_BUFFER_DIRTY],
              c[NV2A_PROF_FINISH_SURFACE_CREATE],
              c[NV2A_PROF_FINISH_SURFACE_DOWN],

@@ -2456,6 +2456,7 @@ void pgraph_vk_flush_all_frames(PGRAPHState *pg)
 
 static void flush_reorder_window_internal(NV2AState *d);
 static void flush_draw_queue_internal(NV2AState *d);
+static void release_shadow_pages(PGRAPHState *pg);
 
 void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 {
@@ -2555,6 +2556,9 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         /* Everything recorded so far is on its way to the GPU, so the vertex
          * RAM pages it read are free to be overwritten again. */
         bitmap_clear(r->cb_vertex_pages, 0, r->bitmap_size);
+        if (r->num_cb_shadow_pages) {
+            release_shadow_pages(pg);
+        }
 #if OPT_SYNC_RANGE_SKIP
         r->sync_range_attr_gen = 0;
         r->sync_range_min = UINT32_MAX;
@@ -6236,6 +6240,46 @@ static void get_size_and_count_for_format(VkFormat fmt, size_t *size, size_t *co
     *count = table[fmt].count;
 }
 
+/*
+ * Pages left out of the RAM buffer while the command buffer was recorded (see
+ * pgraph_vk_update_vertex_ram_buffer) are marked dirty once it is submitted,
+ * so the next draw that reads them uploads their current contents. The upload
+ * happens after this finish has rotated to the next frame's buffer or waited
+ * for the GPU, like every other write to the buffer.
+ */
+static void release_shadow_pages(PGRAPHState *pg)
+{
+    NV2AState *d = container_of(pg, NV2AState, pgraph);
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    unsigned long *bmp = r->cb_shadow_pages;
+
+    unsigned long bit = find_first_bit(bmp, r->bitmap_size);
+    while (bit < r->bitmap_size) {
+        unsigned long end = find_next_zero_bit(bmp, r->bitmap_size, bit);
+        memory_region_set_client_dirty(d->vram, bit * TARGET_PAGE_SIZE,
+                                       (end - bit) * TARGET_PAGE_SIZE,
+                                       DIRTY_MEMORY_NV2A);
+        bitmap_clear(bmp, bit, end - bit);
+        bit = find_next_bit(bmp, r->bitmap_size, end);
+    }
+    r->num_cb_shadow_pages = 0;
+}
+
+static bool attribute_reads_shadow_pages(PGRAPHVkState *r, int attr_id,
+                                         uint32_t stride, size_t element_bytes,
+                                         uint32_t num_vertices)
+{
+    if (!r->num_cb_shadow_pages || !num_vertices) {
+        return false;
+    }
+    hwaddr start = r->vertex_attribute_offsets[attr_id];
+    hwaddr end = start + (hwaddr)stride * (num_vertices - 1) + element_bytes;
+    size_t end_bit = MIN(TARGET_PAGE_ALIGN(end) / TARGET_PAGE_SIZE,
+                         r->bitmap_size);
+    return find_next_bit(r->cb_shadow_pages, end_bit,
+                         start / TARGET_PAGE_SIZE) < end_bit;
+}
+
 static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
                                                     uint32_t num_vertices)
 {
@@ -6263,7 +6307,12 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
             (r->vertex_attribute_offsets[attr_id] % element_size == 0);
         bool stride_valid = (desc->stride % element_size == 0);
 
-        if (offset_valid && stride_valid) {
+        /* Attributes on a page the RAM buffer holds an older copy of are
+         * copied from guest RAM like unaligned ones. */
+        if (offset_valid && stride_valid &&
+            !attribute_reads_shadow_pages(r, attr_id, desc->stride,
+                                          element_size * element_count,
+                                          num_vertices)) {
             continue;
         }
 
