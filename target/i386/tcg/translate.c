@@ -32,6 +32,7 @@
 #include "exec/helper-gen.h"
 #include "helper-tcg.h"
 #include "decode-new.h"
+#include "bink-hle.h"
 
 #include "exec/log.h"
 
@@ -4626,6 +4627,32 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     /* enter_mmx state survives only from the directly preceding instruction */
     dc->mmx_entered = dc->mmx_insn;
     dc->mmx_insn = false;
+
+    /*
+     * A known Bink routine starting this TB runs natively as one helper
+     * call, which also performs its return (see bink-hle.c).
+     */
+    if (dc->base.num_insns == 1 && CODE32(dc) && SS32(dc) && !ADDSEG(dc) &&
+        !(dc->flags & (HF_TF_MASK | HF_INHIBIT_IRQ_MASK)) &&
+        bink_hle_enabled()) {
+        uint32_t bases[3] = { 0, 0, 0 };
+        int id = bink_hle_match(cpu_env(cpu), &dc->base, dc->base.pc_next,
+                                bases);
+        if (id != BINK_HLE_NONE) {
+            gen_update_cc_op(dc);
+            gen_update_eip_cur(dc);
+            gen_helper_bink_hle(tcg_env, tcg_constant_i32(id),
+                                tcg_constant_i32(bases[0]),
+                                tcg_constant_i32(bases[1]),
+                                tcg_constant_i32(bases[2]));
+            set_cc_op(dc, CC_OP_DYNAMIC);
+            dc->pc_save = -1;
+            dc->pc = dc->base.pc_next + 1;
+            dc->base.pc_next = dc->pc;
+            dc->base.is_jmp = DISAS_JUMP;
+            return;
+        }
+    }
 
 #ifdef TARGET_VSYSCALL_PAGE
     /*

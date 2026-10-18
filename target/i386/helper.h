@@ -224,6 +224,7 @@ DEF_HELPER_2(ldmxcsr, void, env, i32)
 DEF_HELPER_1(update_mxcsr, void, env)
 DEF_HELPER_1(enter_mmx, void, env)
 DEF_HELPER_1(emms, void, env)
+DEF_HELPER_5(bink_hle, void, env, i32, i32, i32, i32)
 
 #define SHIFT 0
 #include "tcg/ops_sse_header.h.inc"

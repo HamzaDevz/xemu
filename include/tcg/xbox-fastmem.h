@@ -13,6 +13,9 @@
  */
 #define XBOX_FASTMEM_MMU_IDX 5
 
+/* See cputlb.c: changes whenever cached host pointers may be stale. */
+extern uint32_t xbox_host_map_gen;
+
 #if defined(XBOX) && defined(__aarch64__) && defined(CONFIG_LINUX)
 #define XBOX_FASTMEM_SUPPORTED 1
 
