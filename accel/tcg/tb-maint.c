@@ -779,6 +779,23 @@ static void tb_remove(TranslationBlock *tb)
  * Must be called from a context in which no cpus are running,
  * e.g. start_exclusive() or vm_stop().
  */
+/*
+ * Sites live as long as the code that refers to them, so they are handed out
+ * in order and all taken back by tb_flush().  Once they run out, new sites
+ * simply call the lookup helper every time.
+ */
+#define TB_SITE_CACHE_SIZE (1 << 17)
+static TBSiteCache tb_site_cache[TB_SITE_CACHE_SIZE];
+static unsigned tb_site_cache_used;
+
+TBSiteCache *tb_site_cache_alloc(void)
+{
+    if (tb_site_cache_used == TB_SITE_CACHE_SIZE) {
+        return NULL;
+    }
+    return &tb_site_cache[tb_site_cache_used++];
+}
+
 void tb_flush__exclusive_or_serial(void)
 {
     CPUState *cpu;
@@ -798,6 +815,8 @@ void tb_flush__exclusive_or_serial(void)
     tb_remove_all();
 
     tcg_region_reset_all();
+    /* Every CPU's tb_site_gen moved on in tcg_flush_jmp_cache() above */
+    tb_site_cache_used = 0;
     xbox_fastmem_code_flushed();
     /* XXX: flush processor icache at this point if cache flush is expensive */
     qatomic_inc(&tb_ctx.tb_flush_count);

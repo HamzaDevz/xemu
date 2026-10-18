@@ -832,6 +832,8 @@ void tcg_flush_jmp_cache(CPUState *cpu)
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
 
+    cpu->neg.tb_site_gen++;
+
     /* During early initialization, the cache may not yet be allocated. */
     if (unlikely(jc == NULL)) {
         return;

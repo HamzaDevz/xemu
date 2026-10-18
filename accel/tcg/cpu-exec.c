@@ -777,7 +777,8 @@ lookup_tb_ptr_i32_slow(CPUState *cpu, vaddr pc, uint64_t cs_base,
 }
 
 const void *HELPER(lookup_tb_ptr_i32)(CPUArchState *env, uint32_t eip,
-                                      uint64_t cs_base, uint32_t flags)
+                                      uint64_t cs_base, uint32_t flags,
+                                      void *site)
 {
     CPUState *cpu = env_cpu(env);
     vaddr pc = (uint32_t)(cs_base + eip);
@@ -801,6 +802,13 @@ const void *HELPER(lookup_tb_ptr_i32)(CPUArchState *env, uint32_t eip,
         if (likely(tb)) {
             assert((tb_cflags(tb) & CF_PCREL) || tb->pc == pc);
             cpu->neg.can_do_io = true;
+            if (site) {
+                TBSiteCache *sc = site;
+
+                sc->tb = tb;
+                sc->eip = eip;
+                sc->gen = cpu->neg.tb_site_gen;
+            }
             return tb->tc.ptr;
         }
     }

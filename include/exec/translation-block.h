@@ -54,6 +54,20 @@ typedef struct SuperblockInfo {
 } SuperblockInfo;
 #endif
 
+/*
+ * One block end that leaves through lookup_and_goto_ptr, with the block it
+ * reached last time.  Generated code jumps straight there while @gen still
+ * equals the CPU's tb_site_gen, @eip matches and the block is not
+ * CF_INVALID, and calls the lookup helper (which refills it) otherwise.
+ */
+typedef struct TBSiteCache {
+    uint64_t gen;
+    TranslationBlock *tb;
+    uint32_t eip;
+} TBSiteCache;
+
+TBSiteCache *tb_site_cache_alloc(void);
+
 struct TranslationBlock {
     /*
      * Guest PC corresponding to this block.  This must be the true

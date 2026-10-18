@@ -28,6 +28,7 @@
 #include "tcg/tcg-op-common.h"
 #include "exec/translation-block.h"
 #include "exec/plugin-gen.h"
+#include "hw/core/cpu.h"
 #include "tcg-internal.h"
 #include "tcg-has.h"
 
@@ -3273,6 +3274,7 @@ void tcg_gen_lookup_and_goto_ptr(void)
 void tcg_gen_lookup_and_goto_ptr_i32(TCGv_i32 eip, uint64_t cs_base,
                                      uint32_t flags)
 {
+    TBSiteCache *site;
     TCGv_ptr ptr;
 
     if (tcg_ctx->gen_tb->cflags & CF_NO_GOTO_PTR) {
@@ -3281,10 +3283,45 @@ void tcg_gen_lookup_and_goto_ptr_i32(TCGv_i32 eip, uint64_t cs_base,
     }
 
     plugin_gen_disable_mem_helpers();
+
+    /*
+     * Returns and cross-page jumps mostly go where they went last time, so
+     * try the block this site reached before the helper call, which costs
+     * several times more.  The site cache is only filled and read by the
+     * one CPU, hence not under CF_PARALLEL.
+     */
+    site = tcg_ctx->gen_tb->cflags & CF_PARALLEL ? NULL : tb_site_cache_alloc();
+    if (site) {
+        TCGLabel *miss = gen_new_label();
+        TCGv_ptr sp = tcg_constant_ptr(site);
+        TCGv_i64 gen = tcg_temp_ebb_new_i64();
+        TCGv_i64 site_gen = tcg_temp_ebb_new_i64();
+        TCGv_i32 t32 = tcg_temp_ebb_new_i32();
+        TCGv_ptr tb = tcg_temp_ebb_new_ptr();
+
+        tcg_gen_ld_i64(gen, tcg_env,
+                       offsetof(CPUState, neg.tb_site_gen) - sizeof(CPUState));
+        tcg_gen_ld_i64(site_gen, sp, offsetof(TBSiteCache, gen));
+        tcg_gen_brcond_i64(TCG_COND_NE, gen, site_gen, miss);
+        tcg_gen_ld_i32(t32, sp, offsetof(TBSiteCache, eip));
+        tcg_gen_brcond_i32(TCG_COND_NE, t32, eip, miss);
+        tcg_gen_ld_ptr(tb, sp, offsetof(TBSiteCache, tb));
+        tcg_gen_ld_i32(t32, tb, offsetof(TranslationBlock, cflags));
+        tcg_gen_brcondi_i32(TCG_COND_TSTNE, t32, CF_INVALID, miss);
+        tcg_gen_ld_ptr(tb, tb, offsetof(TranslationBlock, tc.ptr));
+        tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(tb));
+        tcg_temp_free_i64(gen);
+        tcg_temp_free_i64(site_gen);
+        tcg_temp_free_i32(t32);
+        tcg_temp_free_ptr(tb);
+        gen_set_label(miss);
+    }
+
     ptr = tcg_temp_ebb_new_ptr();
     gen_helper_lookup_tb_ptr_i32(ptr, tcg_env, eip,
                                  tcg_constant_i64(cs_base),
-                                 tcg_constant_i32(flags));
+                                 tcg_constant_i32(flags),
+                                 tcg_constant_ptr(site));
     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
     tcg_temp_free_ptr(ptr);
 }

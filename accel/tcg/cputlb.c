@@ -152,6 +152,7 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
     CPUJumpCache *jc = cpu->tb_jmp_cache;
     int i, i0;
 
+    cpu->neg.tb_site_gen++;
     if (unlikely(!jc)) {
         return;
     }

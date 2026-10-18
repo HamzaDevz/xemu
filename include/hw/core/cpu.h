@@ -410,6 +410,11 @@ typedef struct CPUNegativeOffsetState {
 #endif
     IcountDecr icount_decr;
     bool can_do_io;
+    /*
+     * Bumped whenever the jump cache is flushed, in whole or for a page, so
+     * every TBSiteCache filled before then stops matching.
+     */
+    uint64_t tb_site_gen;
 } CPUNegativeOffsetState;
 
 struct KVMState;
