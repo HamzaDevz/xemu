@@ -25,7 +25,7 @@ Paquet `com.izzy2lost.x1box.odin3` (X1 BOX, port Android de xemu), comparé à `
 |---|---|---|---|---|---|---|
 | Crazy Taxi 3 (EU) | 🔵 Jouable | en jeu, ligne de départ | 59,1 fps en jeu, 7,8 W, CPU 92 °C ; intro 53 fps | intro vidéo saccadée ; jamais vu en pleine course | 2026-10-18 | 6a72f0528e (série s3) |
 | MotoGP (EU) | 🔵 Jouable | en course, tour 1 (moto à l'arrêt) | 56,2 fps en course, 6,3 % d'images lentes, 8,9 W, CPU 104 °C | limité par le CPU, n'atteint pas 60 ; x87 et cache (4baf65b0ac, 6a72f0528e) : course 52 → 56,5 fps | 2026-10-18 | 6a72f0528e |
-| Metal Slug 3 (EU) | 🟡 Problèmes | en jeu | 59,8 fps, 6,6 W, CPU 85 °C | grandes zones de décor noires, aussi sur l'amont ; 4e2b2f34c9 : intro 41 → 58 fps | 2026-10-18 | 6a72f0528e (série s3) |
+| Metal Slug 3 (EU) | 🔵 Jouable | début de la mission 1 | 59,7 fps, 0,08 % d'images lentes, 6,3 W, CPU 64,8 °C, GPU 45,1 °C | décor et quatre portraits complets ; 6c13ef471b propage l'invalidation à toutes les textures partageant une page VRAM | 2026-10-19 | 6c13ef471b |
 | Metal Slug 4 (USA, EU) | 🟡 Problèmes | en jeu | 59,1 fps, 6,1 W, CPU 70 °C | la majeure partie du décor est noire (même bug que MS3) | 2026-10-18 | 4e2b2f34c9 |
 | Metal Slug 5 (USA) | 🟡 Problèmes | en jeu | 57,5 fps, 6,7 W, CPU 90 °C | tuiles noires ; seul jeu où l'amont fait mieux (59,1 fps, mais 11,9 W) | 2026-10-18 | 6a72f0528e (série s3) |
 | Ninja Gaiden (EU) | 🔵 Jouable | début du chapitre 1, vallée et cascade ; déplacements, sauts et attaques | 58,3 fps sur 19,8 s, 4,9 % d’images lentes, pire 83,3 ms | enfin mesuré en jeu (`codex-ng-real/gameplay`) ; cible native 60, pas encore un 60 stable ; image correcte sur le passage, suite non testée | 2026-10-19 | 6a72f0528e |
