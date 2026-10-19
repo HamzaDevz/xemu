@@ -28,7 +28,7 @@ Paquet `com.izzy2lost.x1box.odin3` (X1 BOX, port Android de xemu), comparé à `
 | Metal Slug 3 (EU) | 🟡 Problèmes | en jeu | 59,8 fps, 6,6 W, CPU 85 °C | grandes zones de décor noires, aussi sur l'amont ; 4e2b2f34c9 : intro 41 → 58 fps | 2026-10-18 | 6a72f0528e (série s3) |
 | Metal Slug 4 (USA, EU) | 🟡 Problèmes | en jeu | 59,1 fps, 6,1 W, CPU 70 °C | la majeure partie du décor est noire (même bug que MS3) | 2026-10-18 | 4e2b2f34c9 |
 | Metal Slug 5 (USA) | 🟡 Problèmes | en jeu | 57,5 fps, 6,7 W, CPU 90 °C | tuiles noires ; seul jeu où l'amont fait mieux (59,1 fps, mais 11,9 W) | 2026-10-18 | 6a72f0528e (série s3) |
-| Ninja Gaiden (EU) | 🟠 Menus/intro | intro, menu, chargement de partie | 59,4 fps, 3,3-4,0 W, CPU 69 °C | consommation de l'intro divisée par deux (7,8 → 3,6 W) ; aucun défaut vu | 2026-10-18 | 6a72f0528e (série s3) |
+| Ninja Gaiden (EU) | 🔵 Jouable | début du chapitre 1, vallée et cascade ; déplacements, sauts et attaques | 58,3 fps sur 19,8 s, 4,9 % d’images lentes, pire 83,3 ms | enfin mesuré en jeu (`codex-ng-real/gameplay`) ; cible native 60, pas encore un 60 stable ; image correcte sur le passage, suite non testée | 2026-10-19 | 6a72f0528e |
 | Conker: Live & Reloaded (EU) | 🟠 Menus/intro | logo Rare, menu profil | intro 59,8 fps, menu 29,9 fps, 2,9 W | l'image `.xiso.iso` affichait « disque endommagé », le `.iso` du 18/10 non | 2026-10-18 | 6a72f0528e (série s3) |
 | Soulcalibur II (EU) | 🟠 Menus/intro | intro (720p), sauvegarde | 59,9 fps, intro 8,6 W et CPU 104 °C | 6889982e0a (720p/1080i à 60 Hz) obligatoire, sinon 50 fps comme l'amont | 2026-10-18 | 6a72f0528e (série s3) |
 | XIII (USA, EU) | 🟠 Menus/intro | menu, création de profil | 59,9 fps, 2,6-3,5 W, CPU 59 °C | aucun défaut vu | 2026-10-18 | 6a72f0528e (série s3) |
