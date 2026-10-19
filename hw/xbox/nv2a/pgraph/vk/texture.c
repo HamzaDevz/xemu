@@ -620,6 +620,16 @@ static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
                                               DIRTY_MEMORY_NV2A_TEX);
 }
 
+static bool check_and_mark_texture_dirty(NV2AState *d, hwaddr addr,
+                                         hwaddr size)
+{
+    bool dirty = check_texture_dirty(d, addr, size);
+    if (dirty) {
+        mark_texture_range_dirty(d, addr, size, true);
+    }
+    return dirty;
+}
+
 bool pgraph_vk_poll_texture_memory_dirty(NV2AState *d)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
@@ -635,20 +645,16 @@ bool pgraph_vk_poll_texture_memory_dirty(NV2AState *d)
             continue;
         }
 
-        bool texture_dirty = check_texture_dirty(
+        bool texture_dirty = check_and_mark_texture_dirty(
             d, binding->key.texture_vram_offset,
             binding->key.texture_length);
         if (texture_dirty) {
             found_dirty = true;
-            mark_texture_range_dirty(d, binding->key.texture_vram_offset,
-                                     binding->key.texture_length, true);
         }
         if (binding->key.palette_length > 0 &&
-            check_texture_dirty(d, binding->key.palette_vram_offset,
-                                binding->key.palette_length)) {
+            check_and_mark_texture_dirty(d, binding->key.palette_vram_offset,
+                                         binding->key.palette_length)) {
             found_dirty = true;
-            mark_texture_range_dirty(d, binding->key.palette_vram_offset,
-                                     binding->key.palette_length, true);
         }
     }
 
@@ -665,12 +671,14 @@ static void resolve_possibly_dirty_textures(NV2AState *d)
         if (!b || b == &r->dummy_texture || !b->possibly_dirty) continue;
         if (b->dirty_check_frame == pg->frame_time) continue;
 
-        bool vram_dirty = check_texture_dirty(
+        bool texture_dirty = check_and_mark_texture_dirty(
             d, b->key.texture_vram_offset, b->key.texture_length);
+        bool palette_dirty = false;
         if (b->key.palette_length > 0) {
-            vram_dirty |= check_texture_dirty(
+            palette_dirty = check_and_mark_texture_dirty(
                 d, b->key.palette_vram_offset, b->key.palette_length);
         }
+        bool vram_dirty = texture_dirty || palette_dirty;
         b->dirty_check_frame = pg->frame_time;
         b->dirty_check_result = vram_dirty;
         if (!vram_dirty) {
@@ -1826,12 +1834,14 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             snode->dirty_check_frame == pg->frame_time &&
             !snode->dirty_check_result;
         if (!skip_dirty_check) {
-            bool vram_dirty = check_texture_dirty(
+            bool texture_dirty = check_and_mark_texture_dirty(
                 d, texture_vram_offset, texture_length);
+            bool palette_dirty = false;
             if (texture_palette_data_size) {
-                vram_dirty |= check_texture_dirty(
+                palette_dirty = check_and_mark_texture_dirty(
                     d, texture_palette_vram_offset, texture_palette_data_size);
             }
+            bool vram_dirty = texture_dirty || palette_dirty;
             if (vram_dirty) {
                 possibly_dirty = true;
             }
