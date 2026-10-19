@@ -2945,6 +2945,7 @@ class SettingsActivity : AppCompatActivity() {
 
   private fun isPersistentCacheEntry(name: String): Boolean {
     return name == "shaders" ||
+      name == "rt_dumps" ||
       name == "tb_cache.bin" ||
       name == "shader_cache_list" ||
       name.startsWith("scache-") ||
