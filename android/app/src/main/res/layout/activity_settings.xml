@@ -1080,6 +1080,17 @@
                 android:text="@string/settings_dashboard_import_action" />
             </LinearLayout>
 
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_manage_saves"
+              style="@style/Widget.Xemu.Button.Outlined.Pill"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:layout_marginTop="8dp"
+              android:text="@string/save_manager_open"
+              app:icon="@drawable/ic_xemu_hard_drive"
+              app:iconGravity="textStart"
+              app:iconPadding="8dp" />
+
           </LinearLayout>
 
           <View

@@ -283,6 +283,9 @@ class GameLibraryActivity : AppCompatActivity() {
     btnSettings.setOnClickListener {
       startActivity(Intent(this, SettingsActivity::class.java))
     }
+    findViewById<View>(R.id.btn_library_saves).setOnClickListener {
+      startActivity(Intent(this, SaveManagerActivity::class.java))
+    }
     btnSnapshots.setOnClickListener {
       showSnapshotStartupPicker()
     }

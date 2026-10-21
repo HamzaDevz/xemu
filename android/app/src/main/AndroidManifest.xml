@@ -65,5 +65,10 @@
       android:screenOrientation="fullSensor"
       android:exported="false" />
 
+    <activity
+      android:name=".SaveManagerActivity"
+      android:screenOrientation="fullSensor"
+      android:exported="false" />
+
   </application>
 </manifest>

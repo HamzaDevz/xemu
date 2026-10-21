@@ -29,7 +29,7 @@
 #define XEMU_FATX_END_OF_DIR_MARKER2 0x00U
 #define XEMU_FATX_DELETED_FILE_MARKER 0xE5U
 #define XEMU_FATX_ATTR_DIRECTORY (1U << 4)
-#define XEMU_FATX_ATTR_MASK 0x0FU
+#define XEMU_FATX_ATTR_MASK 0x3FU
 #define XEMU_FATX_FAT_TYPE_16 16
 #define XEMU_FATX_FAT_TYPE_32 32
 #define XEMU_FATX_FAT_CACHE_NUM_ENTRIES 512U
@@ -696,6 +696,16 @@ static uint16_t xemu_fatx_pack_time(const XemuFatxTs *value)
                       ((value->second / 2) & 0x1F));
 }
 
+static void xemu_fatx_unpack_ts(uint16_t date, uint16_t time_value, XemuFatxTs *out)
+{
+    out->day = date & 0x1F;
+    out->month = (date >> 5) & 0x0F;
+    out->year = (uint16_t)(2000 + ((date >> 9) & 0x7F));
+    out->hour = (time_value >> 11) & 0x1F;
+    out->minute = (time_value >> 5) & 0x3F;
+    out->second = (uint8_t)((time_value & 0x1F) * 2);
+}
+
 static void xemu_fatx_raw_to_attr(const XemuFatxRawDirectoryEntry *entry, XemuFatxAttr *attr)
 {
     memset(attr, 0, sizeof(*attr));
@@ -704,6 +714,9 @@ static void xemu_fatx_raw_to_attr(const XemuFatxRawDirectoryEntry *entry, XemuFa
     attr->attributes = entry->attributes & XEMU_FATX_ATTR_MASK;
     attr->first_cluster = entry->first_cluster;
     attr->file_size = entry->file_size;
+    xemu_fatx_unpack_ts(entry->modified_date, entry->modified_time, &attr->modified);
+    xemu_fatx_unpack_ts(entry->created_date, entry->created_time, &attr->created);
+    xemu_fatx_unpack_ts(entry->accessed_date, entry->accessed_time, &attr->accessed);
 }
 
 static void xemu_fatx_attr_to_raw(const XemuFatxAttr *attr, XemuFatxRawDirectoryEntry *entry)
@@ -775,7 +788,13 @@ static int xemu_fatx_next_dir_entry(XemuFatxFs *fs, XemuFatxDir *dir)
     if (!xemu_fatx_read_fat(fs, dir->cluster, &entry)) {
         return XEMU_FATX_STATUS_ERROR;
     }
-    if (xemu_fatx_get_fat_entry_type(fs, entry) != XEMU_FATX_CLUSTER_DATA) {
+    switch (xemu_fatx_get_fat_entry_type(fs, entry)) {
+    case XEMU_FATX_CLUSTER_DATA:
+        break;
+    case XEMU_FATX_CLUSTER_END:
+        /* The last cluster was full; there is no end marker to read. */
+        return XEMU_FATX_STATUS_END_OF_DIR;
+    default:
         xemu_fatx_set_error(fs, "Expected another FATX directory cluster");
         return XEMU_FATX_STATUS_ERROR;
     }
@@ -836,6 +855,9 @@ static int xemu_fatx_open_dir(XemuFatxFs *fs, const char *path, XemuFatxDir *dir
             }
 
             status = xemu_fatx_next_dir_entry(fs, dir);
+            if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+                return XEMU_FATX_STATUS_FILE_NOT_FOUND;
+            }
             if (status != XEMU_FATX_STATUS_SUCCESS) {
                 return status;
             }
@@ -866,6 +888,9 @@ static int xemu_fatx_get_attr_dir(XemuFatxFs *fs,
         }
 
         status = xemu_fatx_next_dir_entry(fs, dir);
+        if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+            return XEMU_FATX_STATUS_FILE_NOT_FOUND;
+        }
         if (status != XEMU_FATX_STATUS_SUCCESS) {
             return status;
         }
@@ -951,54 +976,72 @@ static int xemu_fatx_mark_dir_entry(XemuFatxFs *fs, XemuFatxDir *dir, uint8_t ma
     return XEMU_FATX_STATUS_SUCCESS;
 }
 
+/* Appends a zeroed cluster to the directory chain that ends at tail. */
+static bool xemu_fatx_extend_dir(XemuFatxFs *fs, uint32_t tail, uint32_t *new_cluster)
+{
+    return xemu_fatx_alloc_cluster(fs, new_cluster, true) &&
+           xemu_fatx_attach_cluster(fs, tail, *new_cluster);
+}
+
+/*
+ * Points dir at a free slot (a deleted entry, or the end marker), growing the
+ * directory by a cluster when it is full, and keeps an end marker after it.
+ */
 static int xemu_fatx_alloc_dir_entry(XemuFatxFs *fs, XemuFatxDir *dir)
 {
+    uint64_t entries_per_cluster = fs->bytes_per_cluster / sizeof(XemuFatxRawDirectoryEntry);
     XemuFatxDirent entry;
     XemuFatxAttr attr;
+    XemuFatxDir next;
+    uint32_t fat_entry;
     int status;
 
     dir->entry = 0;
     while (1) {
         status = xemu_fatx_read_dir(fs, dir, &entry, &attr);
-        if (status == XEMU_FATX_STATUS_SUCCESS) {
-            status = xemu_fatx_next_dir_entry(fs, dir);
-            if (status != XEMU_FATX_STATUS_SUCCESS) {
-                break;
-            }
-        } else if (status == XEMU_FATX_STATUS_FILE_DELETED) {
+        if (status == XEMU_FATX_STATUS_FILE_DELETED) {
             return XEMU_FATX_STATUS_SUCCESS;
-        } else if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+        }
+        if (status == XEMU_FATX_STATUS_END_OF_DIR) {
             break;
-        } else {
+        }
+        if (status != XEMU_FATX_STATUS_SUCCESS) {
+            return XEMU_FATX_STATUS_ERROR;
+        }
+
+        status = xemu_fatx_next_dir_entry(fs, dir);
+        if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+            /* Every slot of every cluster is taken: use a new cluster. */
+            uint32_t new_cluster;
+
+            if (!xemu_fatx_extend_dir(fs, dir->cluster, &new_cluster)) {
+                return XEMU_FATX_STATUS_ERROR;
+            }
+            dir->cluster = new_cluster;
+            dir->entry = 0;
+            break;
+        }
+        if (status != XEMU_FATX_STATUS_SUCCESS) {
             return XEMU_FATX_STATUS_ERROR;
         }
     }
 
-    if ((uint64_t)dir->entry <
-        fs->bytes_per_cluster / sizeof(XemuFatxRawDirectoryEntry)) {
-        dir->entry += 1;
-        status = xemu_fatx_mark_dir_entry(fs, dir, XEMU_FATX_END_OF_DIR_MARKER);
-        dir->entry -= 1;
-        return status;
+    /* The slot taken was the end of the directory; mark the one after it. */
+    next = *dir;
+    if ((uint64_t)next.entry + 1 < entries_per_cluster) {
+        next.entry++;
+        return xemu_fatx_mark_dir_entry(fs, &next, XEMU_FATX_END_OF_DIR_MARKER);
     }
-
-    {
-        uint32_t new_cluster;
-        uint32_t current_cluster = dir->cluster;
-        uint32_t current_entry = dir->entry;
-
-        if (!xemu_fatx_alloc_cluster(fs, &new_cluster, true) ||
-            !xemu_fatx_attach_cluster(fs, current_cluster, new_cluster)) {
-            return XEMU_FATX_STATUS_ERROR;
-        }
-
-        dir->cluster = new_cluster;
-        dir->entry = 0;
-        status = xemu_fatx_mark_dir_entry(fs, dir, XEMU_FATX_END_OF_DIR_MARKER);
-        dir->cluster = current_cluster;
-        dir->entry = current_entry;
-        return status;
+    if (!xemu_fatx_read_fat(fs, dir->cluster, &fat_entry)) {
+        return XEMU_FATX_STATUS_ERROR;
     }
+    if (xemu_fatx_get_fat_entry_type(fs, fat_entry) == XEMU_FATX_CLUSTER_DATA) {
+        next.cluster = fat_entry;
+    } else if (!xemu_fatx_extend_dir(fs, dir->cluster, &next.cluster)) {
+        return XEMU_FATX_STATUS_ERROR;
+    }
+    next.entry = 0;
+    return xemu_fatx_mark_dir_entry(fs, &next, XEMU_FATX_END_OF_DIR_MARKER);
 }
 
 static int xemu_fatx_create_dirent(XemuFatxFs *fs,
@@ -1332,6 +1375,9 @@ static int xemu_fatx_unlink(XemuFatxFs *fs, const char *path)
         }
 
         status = xemu_fatx_next_dir_entry(fs, &dir);
+        if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+            return XEMU_FATX_STATUS_FILE_NOT_FOUND;
+        }
         if (status != XEMU_FATX_STATUS_SUCCESS) {
             return status;
         }
@@ -1363,6 +1409,9 @@ static int xemu_fatx_rmdir(XemuFatxFs *fs, const char *path)
         }
         if (status == XEMU_FATX_STATUS_FILE_DELETED) {
             status = xemu_fatx_next_dir_entry(fs, &dir);
+            if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+                break;
+            }
             if (status != XEMU_FATX_STATUS_SUCCESS) {
                 return status;
             }
@@ -1507,6 +1556,9 @@ static int xemu_fatx_export_tree(XemuFatxFs *fs,
             }
 
             status = xemu_fatx_next_dir_entry(fs, &dir);
+            if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+                return XEMU_FATX_STATUS_SUCCESS;
+            }
             if (status != XEMU_FATX_STATUS_SUCCESS) {
                 return status;
             }
@@ -1515,7 +1567,7 @@ static int xemu_fatx_export_tree(XemuFatxFs *fs,
 
     {
         g_autofree char *parent = g_path_get_dirname(host_path);
-        g_autofree uint8_t *buffer = NULL;
+        uint8_t *buffer = NULL;
         size_t size = 0;
         FILE *file;
 
@@ -1811,6 +1863,9 @@ static bool xemu_fatx_scan_root_dashboard_markers(XemuFatxFs *fs,
         }
 
         scan_status = xemu_fatx_next_dir_entry(fs, &dir);
+        if (scan_status == XEMU_FATX_STATUS_END_OF_DIR) {
+            return true;
+        }
         if (scan_status != XEMU_FATX_STATUS_SUCCESS) {
             xemu_fatx_propagate_error(fs, errp, NULL);
             return false;
@@ -1923,5 +1978,493 @@ bool xemu_fatx_import_dashboard(BlockBackend *blk,
         return false;
     }
 
+    return true;
+}
+
+/*
+ * Save manager volume API.
+ */
+
+struct XemuFatxVolume {
+    XemuFatxFs fs;
+};
+
+typedef int (*XemuFatxDirVisitor)(XemuFatxFs *fs,
+                                  const char *dir_path,
+                                  const XemuFatxAttr *attr,
+                                  void *opaque);
+
+/*
+ * Visits every live entry of a directory. Unlike xemu_fatx_next_dir_entry(),
+ * a directory whose last cluster is full and has no end marker (as a real
+ * console can leave it) ends cleanly instead of failing.
+ */
+static int xemu_fatx_walk_dir(XemuFatxFs *fs,
+                              const char *path,
+                              XemuFatxDirVisitor visitor,
+                              void *opaque)
+{
+    uint64_t entries_per_cluster = fs->bytes_per_cluster / sizeof(XemuFatxRawDirectoryEntry);
+    XemuFatxDir dir;
+    XemuFatxDirent dirent;
+    XemuFatxAttr attr;
+    int status = xemu_fatx_open_dir(fs, path, &dir);
+
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        return status;
+    }
+
+    while (1) {
+        uint32_t entry;
+        int type;
+
+        status = xemu_fatx_read_dir(fs, &dir, &dirent, &attr);
+        if (status == XEMU_FATX_STATUS_SUCCESS) {
+            status = visitor(fs, path, &attr, opaque);
+            if (status != XEMU_FATX_STATUS_SUCCESS) {
+                return status;
+            }
+        } else if (status == XEMU_FATX_STATUS_END_OF_DIR) {
+            return XEMU_FATX_STATUS_SUCCESS;
+        } else if (status != XEMU_FATX_STATUS_FILE_DELETED) {
+            return status;
+        }
+
+        if ((uint64_t)dir.entry + 1 < entries_per_cluster) {
+            dir.entry++;
+            continue;
+        }
+        if (!xemu_fatx_read_fat(fs, dir.cluster, &entry)) {
+            return XEMU_FATX_STATUS_ERROR;
+        }
+        type = xemu_fatx_get_fat_entry_type(fs, entry);
+        if (type == XEMU_FATX_CLUSTER_END) {
+            return XEMU_FATX_STATUS_SUCCESS;
+        }
+        if (type != XEMU_FATX_CLUSTER_DATA) {
+            xemu_fatx_set_error(fs, "Directory %s has a broken cluster chain", path);
+            return XEMU_FATX_STATUS_ERROR;
+        }
+        dir.cluster = entry;
+        dir.entry = 0;
+    }
+}
+
+static int xemu_fatx_tree_size_visitor(XemuFatxFs *fs,
+                                       const char *dir_path,
+                                       const XemuFatxAttr *attr,
+                                       void *opaque)
+{
+    uint64_t *total = opaque;
+
+    if ((attr->attributes & XEMU_FATX_ATTR_DIRECTORY) != 0) {
+        g_autofree char *child = xemu_fatx_join_path(dir_path, attr->filename);
+
+        return xemu_fatx_walk_dir(fs, child, xemu_fatx_tree_size_visitor, opaque);
+    }
+
+    *total += attr->file_size;
+    return XEMU_FATX_STATUS_SUCCESS;
+}
+
+static int64_t xemu_fatx_ts_to_epoch(const XemuFatxTs *ts)
+{
+    struct tm parts;
+    time_t value;
+
+    if (ts->month < 1 || ts->month > 12 || ts->day < 1 || ts->day > 31) {
+        return 0;
+    }
+
+    memset(&parts, 0, sizeof(parts));
+    parts.tm_year = ts->year - 1900;
+    parts.tm_mon = ts->month - 1;
+    parts.tm_mday = ts->day;
+    parts.tm_hour = ts->hour;
+    parts.tm_min = ts->minute;
+    parts.tm_sec = ts->second;
+    parts.tm_isdst = -1;
+    value = mktime(&parts);
+    return value < 0 ? 0 : (int64_t)value;
+}
+
+typedef struct XemuFatxListContext {
+    bool dir_sizes;
+    XemuFatxEntryCallback callback;
+    void *opaque;
+} XemuFatxListContext;
+
+static int xemu_fatx_list_visitor(XemuFatxFs *fs,
+                                  const char *dir_path,
+                                  const XemuFatxAttr *attr,
+                                  void *opaque)
+{
+    XemuFatxListContext *ctx = opaque;
+    XemuFatxEntryInfo info = {
+        .name = attr->filename,
+        .is_dir = (attr->attributes & XEMU_FATX_ATTR_DIRECTORY) != 0,
+        .size = attr->file_size,
+        .modified = xemu_fatx_ts_to_epoch(&attr->modified),
+    };
+
+    if (info.is_dir) {
+        info.size = 0;
+        if (ctx->dir_sizes) {
+            g_autofree char *child = xemu_fatx_join_path(dir_path, attr->filename);
+            int status = xemu_fatx_walk_dir(fs, child, xemu_fatx_tree_size_visitor,
+                                            &info.size);
+
+            if (status != XEMU_FATX_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+    }
+
+    ctx->callback(&info, ctx->opaque);
+    return XEMU_FATX_STATUS_SUCCESS;
+}
+
+static uint64_t xemu_fatx_clusters_for(XemuFatxFs *fs, uint64_t bytes)
+{
+    uint64_t clusters = (bytes + fs->bytes_per_cluster - 1) / fs->bytes_per_cluster;
+
+    /* mknod/mkdir always allocate a first cluster, even for empty files. */
+    return MAX(clusters, 1);
+}
+
+/*
+ * Counts the clusters an import of host_dir into fatx_dir needs, and the ones
+ * it frees by replacing existing files, without writing anything.
+ */
+static int xemu_fatx_measure_import(XemuFatxFs *fs,
+                                    const char *host_dir,
+                                    const char *fatx_dir,
+                                    uint64_t *needed,
+                                    uint64_t *reclaimed)
+{
+    DIR *dir = opendir(host_dir);
+    struct dirent *entry;
+    int status = XEMU_FATX_STATUS_SUCCESS;
+
+    if (!dir) {
+        xemu_fatx_set_error(fs, "Failed to open %s: %s", host_dir, g_strerror(errno));
+        return XEMU_FATX_STATUS_ERROR;
+    }
+
+    /* Slack for the directory itself outgrowing its entry cluster. */
+    *needed += 1;
+
+    while (status == XEMU_FATX_STATUS_SUCCESS && (entry = readdir(dir)) != NULL) {
+        g_autofree char *host_path = NULL;
+        g_autofree char *fatx_path = NULL;
+        XemuFatxAttr attr;
+        bool exists;
+        bool exists_as_dir;
+        struct stat st;
+
+        if (xemu_should_skip_host_entry(entry->d_name)) {
+            continue;
+        }
+        if (strlen(entry->d_name) > XEMU_FATX_MAX_FILENAME_LEN) {
+            xemu_fatx_set_error(fs, "\"%s\" is longer than the 42 characters FATX allows",
+                                entry->d_name);
+            status = XEMU_FATX_STATUS_ERROR;
+            break;
+        }
+
+        host_path = g_build_filename(host_dir, entry->d_name, NULL);
+        fatx_path = xemu_fatx_join_path(fatx_dir, entry->d_name);
+        if (stat(host_path, &st) != 0) {
+            xemu_fatx_set_error(fs, "Failed to stat %s: %s", host_path, g_strerror(errno));
+            status = XEMU_FATX_STATUS_ERROR;
+            break;
+        }
+
+        status = xemu_fatx_get_attr(fs, fatx_path, &attr);
+        if (status == XEMU_FATX_STATUS_FILE_NOT_FOUND) {
+            exists = false;
+        } else if (status == XEMU_FATX_STATUS_SUCCESS) {
+            exists = true;
+        } else {
+            break;
+        }
+        status = XEMU_FATX_STATUS_SUCCESS;
+        exists_as_dir = exists && (attr.attributes & XEMU_FATX_ATTR_DIRECTORY) != 0;
+
+        if (S_ISDIR(st.st_mode)) {
+            if (!exists_as_dir) {
+                *needed += 1;
+            }
+            if (exists && !exists_as_dir) {
+                *reclaimed += xemu_fatx_clusters_for(fs, attr.file_size);
+            }
+            status = xemu_fatx_measure_import(fs, host_path, fatx_path, needed, reclaimed);
+        } else if (S_ISREG(st.st_mode)) {
+            if ((uint64_t)st.st_size > UINT32_MAX) {
+                xemu_fatx_set_error(fs, "%s is too large for FATX", entry->d_name);
+                status = XEMU_FATX_STATUS_ERROR;
+                break;
+            }
+            *needed += xemu_fatx_clusters_for(fs, (uint64_t)st.st_size);
+            if (exists && !exists_as_dir) {
+                *reclaimed += xemu_fatx_clusters_for(fs, attr.file_size);
+            }
+        }
+    }
+
+    closedir(dir);
+    return status;
+}
+
+static bool xemu_fatx_count_free_clusters(XemuFatxFs *fs, uint64_t *free_clusters)
+{
+    uint64_t count = 0;
+    uint32_t i;
+
+    for (i = XEMU_FATX_FAT_RESERVED_ENTRIES_COUNT; i < fs->fat_entry_count; ++i) {
+        uint32_t entry;
+
+        if (!xemu_fatx_read_fat(fs, i, &entry)) {
+            return false;
+        }
+        if (xemu_fatx_get_fat_entry_type(fs, entry) == XEMU_FATX_CLUSTER_AVAILABLE) {
+            count++;
+        }
+    }
+
+    *free_clusters = count;
+    return true;
+}
+
+static void xemu_fatx_volume_begin(XemuFatxVolume *vol)
+{
+    g_clear_pointer(&vol->fs.error_message, g_free);
+}
+
+XemuFatxVolume *xemu_fatx_volume_open(BlockBackend *blk, char letter, Error **errp)
+{
+    XemuFatxVolume *vol;
+    uint64_t offset;
+    uint64_t size;
+
+    switch (g_ascii_toupper(letter)) {
+    case 'C':
+        offset = XEMU_XBOX_HDD_PARTITION_C_OFFSET;
+        size = XEMU_XBOX_HDD_PARTITION_C_SIZE;
+        break;
+    case 'E':
+        offset = XEMU_XBOX_HDD_PARTITION_E_OFFSET;
+        size = XEMU_XBOX_HDD_PARTITION_E_SIZE;
+        break;
+    default:
+        error_setg(errp, "Partition %c: is not supported", letter);
+        return NULL;
+    }
+
+    vol = g_new0(XemuFatxVolume, 1);
+    if (!xemu_fatx_open_fs(&vol->fs, blk, offset, size, errp)) {
+        g_free(vol);
+        return NULL;
+    }
+    return vol;
+}
+
+bool xemu_fatx_volume_close(XemuFatxVolume *vol, Error **errp)
+{
+    XemuFatxCache *cache;
+    bool ok = true;
+
+    if (!vol) {
+        return true;
+    }
+
+    xemu_fatx_volume_begin(vol);
+    cache = &vol->fs.fat_cache;
+    if (cache->data && cache->dirty) {
+        xemu_fatx_dev_seek(&vol->fs, vol->fs.fat_offset +
+                                     (uint64_t)cache->position * cache->entry_size);
+        if (xemu_fatx_dev_write(&vol->fs, cache->data, cache->entry_size,
+                                cache->entries) != cache->entries) {
+            xemu_fatx_propagate_error(&vol->fs, errp, "Failed to write the FAT: ");
+            ok = false;
+        }
+        cache->dirty = false;
+    }
+
+    xemu_fatx_close_fs(&vol->fs);
+    g_free(vol);
+    return ok;
+}
+
+bool xemu_fatx_volume_space(XemuFatxVolume *vol,
+                            uint64_t *total_bytes,
+                            uint64_t *free_bytes,
+                            Error **errp)
+{
+    XemuFatxFs *fs = &vol->fs;
+    uint64_t free_clusters;
+
+    xemu_fatx_volume_begin(vol);
+    if (!xemu_fatx_count_free_clusters(fs, &free_clusters)) {
+        xemu_fatx_propagate_error(fs, errp, NULL);
+        return false;
+    }
+
+    *total_bytes = (uint64_t)(fs->fat_entry_count - XEMU_FATX_FAT_RESERVED_ENTRIES_COUNT) *
+                   fs->bytes_per_cluster;
+    *free_bytes = free_clusters * fs->bytes_per_cluster;
+    return true;
+}
+
+bool xemu_fatx_volume_list(XemuFatxVolume *vol,
+                           const char *path,
+                           bool dir_sizes,
+                           XemuFatxEntryCallback callback,
+                           void *opaque,
+                           bool *found,
+                           Error **errp)
+{
+    XemuFatxFs *fs = &vol->fs;
+    XemuFatxListContext ctx = {
+        .dir_sizes = dir_sizes,
+        .callback = callback,
+        .opaque = opaque,
+    };
+    int status;
+
+    xemu_fatx_volume_begin(vol);
+    *found = true;
+
+    if (g_strcmp0(path, "/") != 0) {
+        XemuFatxAttr attr;
+
+        status = xemu_fatx_get_attr(fs, path, &attr);
+        if (status == XEMU_FATX_STATUS_FILE_NOT_FOUND) {
+            *found = false;
+            return true;
+        }
+        if (status != XEMU_FATX_STATUS_SUCCESS) {
+            xemu_fatx_propagate_error(fs, errp, NULL);
+            return false;
+        }
+        if ((attr.attributes & XEMU_FATX_ATTR_DIRECTORY) == 0) {
+            error_setg(errp, "%s is a file, not a directory", path);
+            return false;
+        }
+    }
+
+    status = xemu_fatx_walk_dir(fs, path, xemu_fatx_list_visitor, &ctx);
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        xemu_fatx_propagate_error(fs, errp, NULL);
+        return false;
+    }
+    return true;
+}
+
+bool xemu_fatx_volume_read_file(XemuFatxVolume *vol,
+                                const char *path,
+                                uint8_t **data,
+                                size_t *size,
+                                Error **errp)
+{
+    int status;
+
+    xemu_fatx_volume_begin(vol);
+    status = xemu_fatx_read_file(&vol->fs, path, data, size);
+    if (status == XEMU_FATX_STATUS_FILE_NOT_FOUND) {
+        error_setg(errp, "%s does not exist", path);
+        return false;
+    }
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        xemu_fatx_propagate_error(&vol->fs, errp, NULL);
+        return false;
+    }
+    return true;
+}
+
+bool xemu_fatx_volume_export(XemuFatxVolume *vol,
+                             const char *fatx_path,
+                             const char *host_path,
+                             Error **errp)
+{
+    int status;
+
+    xemu_fatx_volume_begin(vol);
+    if (g_strcmp0(fatx_path, "/") == 0) {
+        error_setg(errp, "Exporting a whole partition is not supported");
+        return false;
+    }
+
+    status = xemu_fatx_export_tree(&vol->fs, fatx_path, host_path);
+    if (status == XEMU_FATX_STATUS_FILE_NOT_FOUND) {
+        error_setg(errp, "%s does not exist", fatx_path);
+        return false;
+    }
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        xemu_fatx_propagate_error(&vol->fs, errp, NULL);
+        return false;
+    }
+    return true;
+}
+
+bool xemu_fatx_volume_import(XemuFatxVolume *vol,
+                             const char *host_dir,
+                             const char *fatx_dir,
+                             Error **errp)
+{
+    XemuFatxFs *fs = &vol->fs;
+    uint64_t needed = 0;
+    uint64_t reclaimed = 0;
+    uint64_t free_clusters;
+    int status;
+
+    xemu_fatx_volume_begin(vol);
+    status = xemu_fatx_measure_import(fs, host_dir, fatx_dir, &needed, &reclaimed);
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        xemu_fatx_propagate_error(fs, errp, NULL);
+        return false;
+    }
+    if (!xemu_fatx_count_free_clusters(fs, &free_clusters)) {
+        xemu_fatx_propagate_error(fs, errp, NULL);
+        return false;
+    }
+    if (needed > free_clusters + reclaimed) {
+        error_setg(errp, "Not enough free space: the import needs %" PRIu64
+                   " KiB but only %" PRIu64 " KiB is free",
+                   (needed - reclaimed) * fs->bytes_per_cluster / 1024,
+                   free_clusters * fs->bytes_per_cluster / 1024);
+        return false;
+    }
+
+    status = xemu_fatx_ensure_dir(fs, fatx_dir);
+    if (status == XEMU_FATX_STATUS_SUCCESS) {
+        status = xemu_fatx_import_host_tree(fs, host_dir, fatx_dir);
+    }
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        xemu_fatx_propagate_error(fs, errp, NULL);
+        return false;
+    }
+    return true;
+}
+
+bool xemu_fatx_volume_remove(XemuFatxVolume *vol, const char *path, Error **errp)
+{
+    int status;
+
+    xemu_fatx_volume_begin(vol);
+    if (g_strcmp0(path, "/") == 0 || path[0] != '/') {
+        error_setg(errp, "Refusing to delete %s", path);
+        return false;
+    }
+
+    status = xemu_fatx_remove_tree(&vol->fs, path);
+    if (status == XEMU_FATX_STATUS_FILE_NOT_FOUND) {
+        error_setg(errp, "%s does not exist", path);
+        return false;
+    }
+    if (status != XEMU_FATX_STATUS_SUCCESS) {
+        xemu_fatx_propagate_error(&vol->fs, errp, NULL);
+        return false;
+    }
     return true;
 }

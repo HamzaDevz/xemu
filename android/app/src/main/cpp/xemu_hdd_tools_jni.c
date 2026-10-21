@@ -1153,3 +1153,392 @@ cleanup:
         android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
     }
 }
+
+/*
+ * Save manager. A handle keeps one backend and one FATX volume open across
+ * the many small reads a save scan makes.
+ */
+
+typedef struct AndroidXboxSaveHandle {
+    BlockBackend *blk;
+    XemuFatxVolume *vol;
+    bool writable;
+} AndroidXboxSaveHandle;
+
+/*
+ * FATX names are single-byte; Java strings carry them as Latin-1 code points.
+ * Converted by hand: the Android build links an iconv stub, so g_convert()
+ * fails for every string.
+ */
+static char *android_xbox_save_utf8_to_latin1(const char *utf8)
+{
+    GString *out;
+
+    if (!g_utf8_validate(utf8, -1, NULL)) {
+        return NULL;
+    }
+    out = g_string_new(NULL);
+    for (const char *p = utf8; *p; p = g_utf8_next_char(p)) {
+        gunichar c = g_utf8_get_char(p);
+
+        if (c > 0xFF) {
+            g_string_free(out, TRUE);
+            return NULL;
+        }
+        g_string_append_c(out, (char)c);
+    }
+    return g_string_free(out, FALSE);
+}
+
+static char *android_xbox_save_latin1_to_utf8(const char *latin1)
+{
+    GString *out = g_string_new(NULL);
+
+    for (const unsigned char *p = (const unsigned char *)latin1; *p; ++p) {
+        g_string_append_unichar(out, *p);
+    }
+    return g_string_free(out, FALSE);
+}
+
+static char *android_xbox_save_fatx_path(JNIEnv *env, jstring jpath)
+{
+    const char *utf8;
+    char *latin1;
+
+    if (!jpath) {
+        android_xbox_hdd_throw_exception(env, "java/lang/IllegalArgumentException",
+                                         "Missing HDD path.");
+        return NULL;
+    }
+    utf8 = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!utf8) {
+        return NULL;
+    }
+    latin1 = android_xbox_save_utf8_to_latin1(utf8);
+    (*env)->ReleaseStringUTFChars(env, jpath, utf8);
+    if (!latin1) {
+        android_xbox_hdd_throw_exception(env, "java/io/IOException",
+                                         "The path contains characters FATX cannot store.");
+    }
+    return latin1;
+}
+
+static char *android_xbox_save_host_path(JNIEnv *env, jstring jpath)
+{
+    const char *utf8;
+    char *copy;
+
+    if (!jpath) {
+        android_xbox_hdd_throw_exception(env, "java/lang/IllegalArgumentException",
+                                         "Missing local path.");
+        return NULL;
+    }
+    utf8 = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!utf8) {
+        return NULL;
+    }
+    copy = g_strdup(utf8);
+    (*env)->ReleaseStringUTFChars(env, jpath, utf8);
+    return copy;
+}
+
+static AndroidXboxSaveHandle *android_xbox_save_handle(JNIEnv *env, jlong handle)
+{
+    AndroidXboxSaveHandle *save = (AndroidXboxSaveHandle *)(intptr_t)handle;
+
+    if (!save) {
+        android_xbox_hdd_throw_exception(env, "java/lang/IllegalStateException",
+                                         "The HDD is not open.");
+    }
+    return save;
+}
+
+static void android_xbox_save_list_entry(const XemuFatxEntryInfo *info, void *opaque)
+{
+    GPtrArray *lines = opaque;
+    g_autofree char *name = android_xbox_save_latin1_to_utf8(info->name);
+
+    /* kind \t size \t mtime \t name; names never contain tabs on FATX. */
+    g_ptr_array_add(lines, g_strdup_printf("%c\t%" PRIu64 "\t%" PRId64 "\t%s",
+                                           info->is_dir ? 'D' : 'F',
+                                           info->size,
+                                           info->modified,
+                                           name));
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeOpen(
+        JNIEnv *env, jobject obj, jstring jhdd_path, jboolean writable)
+{
+    g_autofree char *hdd_path = NULL;
+    AndroidXboxSaveHandle *save;
+    Error *err = NULL;
+
+    (void)obj;
+
+    hdd_path = android_xbox_save_host_path(env, jhdd_path);
+    if (!hdd_path) {
+        return 0;
+    }
+    if (!android_xbox_hdd_ensure_block_layer(&err)) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException",
+                                     "Failed to initialize HDD tools: ", err);
+        return 0;
+    }
+
+    save = g_new0(AndroidXboxSaveHandle, 1);
+    save->writable = writable;
+    {
+        BQL_LOCK_GUARD();
+
+        save->blk = android_xbox_hdd_open_backend(hdd_path, writable, &err);
+        if (save->blk) {
+            save->vol = xemu_fatx_volume_open(save->blk, 'E', &err);
+            if (!save->vol) {
+                blk_drain(save->blk);
+                blk_unref(save->blk);
+            }
+        }
+    }
+
+    if (!save->vol) {
+        g_free(save);
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+        return 0;
+    }
+    return (jlong)(intptr_t)save;
+}
+
+JNIEXPORT void JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeClose(
+        JNIEnv *env, jobject obj, jlong handle)
+{
+    AndroidXboxSaveHandle *save = (AndroidXboxSaveHandle *)(intptr_t)handle;
+    Error *err = NULL;
+
+    (void)obj;
+
+    if (!save) {
+        return;
+    }
+
+    {
+        BQL_LOCK_GUARD();
+
+        xemu_fatx_volume_close(save->vol, &err);
+        if (save->writable && !err && blk_flush(save->blk) < 0) {
+            error_setg(&err, "Failed to flush HDD writes");
+        }
+        blk_drain(save->blk);
+        blk_unref(save->blk);
+    }
+    g_free(save);
+
+    if (err) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+    }
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeSpace(
+        JNIEnv *env, jobject obj, jlong handle)
+{
+    AndroidXboxSaveHandle *save = android_xbox_save_handle(env, handle);
+    uint64_t total = 0;
+    uint64_t free_bytes = 0;
+    Error *err = NULL;
+    jlong values[2];
+    jlongArray result;
+    bool ok;
+
+    (void)obj;
+
+    if (!save) {
+        return NULL;
+    }
+    {
+        BQL_LOCK_GUARD();
+        ok = xemu_fatx_volume_space(save->vol, &total, &free_bytes, &err);
+    }
+    if (!ok) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+        return NULL;
+    }
+
+    values[0] = (jlong)total;
+    values[1] = (jlong)free_bytes;
+    result = (*env)->NewLongArray(env, 2);
+    if (result) {
+        (*env)->SetLongArrayRegion(env, result, 0, 2, values);
+    }
+    return result;
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeList(
+        JNIEnv *env, jobject obj, jlong handle, jstring jpath, jboolean dir_sizes)
+{
+    AndroidXboxSaveHandle *save = android_xbox_save_handle(env, handle);
+    g_autofree char *path = NULL;
+    g_autoptr(GPtrArray) lines = NULL;
+    Error *err = NULL;
+    jobjectArray result;
+    jclass string_class;
+    bool found = false;
+    bool ok;
+
+    (void)obj;
+
+    if (!save || !(path = android_xbox_save_fatx_path(env, jpath))) {
+        return NULL;
+    }
+
+    lines = g_ptr_array_new_with_free_func(g_free);
+    {
+        BQL_LOCK_GUARD();
+        ok = xemu_fatx_volume_list(save->vol, path, dir_sizes,
+                                   android_xbox_save_list_entry, lines, &found, &err);
+    }
+    if (!ok) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+        return NULL;
+    }
+    if (!found) {
+        return NULL;
+    }
+
+    string_class = (*env)->FindClass(env, "java/lang/String");
+    if (!string_class) {
+        return NULL;
+    }
+    result = (*env)->NewObjectArray(env, (jsize)lines->len, string_class, NULL);
+    if (!result) {
+        return NULL;
+    }
+    for (guint i = 0; i < lines->len; ++i) {
+        jstring line = (*env)->NewStringUTF(env, g_ptr_array_index(lines, i));
+
+        if (!line) {
+            return NULL;
+        }
+        (*env)->SetObjectArrayElement(env, result, (jsize)i, line);
+        (*env)->DeleteLocalRef(env, line);
+    }
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeReadFile(
+        JNIEnv *env, jobject obj, jlong handle, jstring jpath)
+{
+    AndroidXboxSaveHandle *save = android_xbox_save_handle(env, handle);
+    g_autofree char *path = NULL;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    Error *err = NULL;
+    jbyteArray result;
+    bool ok;
+
+    (void)obj;
+
+    if (!save || !(path = android_xbox_save_fatx_path(env, jpath))) {
+        return NULL;
+    }
+    {
+        BQL_LOCK_GUARD();
+        ok = xemu_fatx_volume_read_file(save->vol, path, &data, &size, &err);
+    }
+    if (!ok) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+        return NULL;
+    }
+
+    result = (*env)->NewByteArray(env, (jsize)size);
+    if (result && size > 0) {
+        (*env)->SetByteArrayRegion(env, result, 0, (jsize)size, (const jbyte *)data);
+    }
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeExport(
+        JNIEnv *env, jobject obj, jlong handle, jstring jfatx_path, jstring jhost_path)
+{
+    AndroidXboxSaveHandle *save = android_xbox_save_handle(env, handle);
+    g_autofree char *fatx_path = NULL;
+    g_autofree char *host_path = NULL;
+    Error *err = NULL;
+    bool ok;
+
+    (void)obj;
+
+    if (!save || !(fatx_path = android_xbox_save_fatx_path(env, jfatx_path)) ||
+        !(host_path = android_xbox_save_host_path(env, jhost_path))) {
+        return;
+    }
+    {
+        BQL_LOCK_GUARD();
+        ok = xemu_fatx_volume_export(save->vol, fatx_path, host_path, &err);
+    }
+    if (!ok) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeImport(
+        JNIEnv *env, jobject obj, jlong handle, jstring jhost_dir, jstring jfatx_dir)
+{
+    AndroidXboxSaveHandle *save = android_xbox_save_handle(env, handle);
+    g_autofree char *host_dir = NULL;
+    g_autofree char *fatx_dir = NULL;
+    Error *err = NULL;
+    bool ok;
+
+    (void)obj;
+
+    if (!save || !(host_dir = android_xbox_save_host_path(env, jhost_dir)) ||
+        !(fatx_dir = android_xbox_save_fatx_path(env, jfatx_dir))) {
+        return;
+    }
+    if (!save->writable) {
+        android_xbox_hdd_throw_exception(env, "java/lang/IllegalStateException",
+                                         "The HDD was opened read-only.");
+        return;
+    }
+    {
+        BQL_LOCK_GUARD();
+        ok = xemu_fatx_volume_import(save->vol, host_dir, fatx_dir, &err);
+    }
+    if (!ok) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_izzy2lost_x1box_XboxSaveManager_00024NativeBridge_nativeRemove(
+        JNIEnv *env, jobject obj, jlong handle, jstring jpath)
+{
+    AndroidXboxSaveHandle *save = android_xbox_save_handle(env, handle);
+    g_autofree char *path = NULL;
+    Error *err = NULL;
+    bool ok;
+
+    (void)obj;
+
+    if (!save || !(path = android_xbox_save_fatx_path(env, jpath))) {
+        return;
+    }
+    if (!save->writable) {
+        android_xbox_hdd_throw_exception(env, "java/lang/IllegalStateException",
+                                         "The HDD was opened read-only.");
+        return;
+    }
+    {
+        BQL_LOCK_GUARD();
+        ok = xemu_fatx_volume_remove(save->vol, path, &err);
+    }
+    if (!ok) {
+        android_xbox_hdd_throw_error(env, "java/io/IOException", NULL, err);
+    }
+}

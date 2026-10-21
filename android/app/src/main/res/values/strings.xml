@@ -457,4 +457,43 @@
   <string name="per_game_settings_saved">Per-game settings saved</string>
   <string name="per_game_settings_cleared">Per-game settings cleared</string>
   <string name="per_game_settings_missing_game">This game could not be resolved.</string>
+
+  <!-- Save manager -->
+  <string name="save_manager_title">Save Manager</string>
+  <string name="save_manager_open">Manage Saves</string>
+  <string name="save_manager_import">Import</string>
+  <string name="save_manager_export_all">Export All</string>
+  <string name="save_manager_export">Export</string>
+  <string name="save_manager_export_game">Export Game Saves</string>
+  <string name="save_manager_delete">Delete</string>
+  <string name="save_manager_delete_game">Delete All</string>
+  <string name="save_manager_close">Close</string>
+  <string name="save_manager_save_actions">Save actions</string>
+  <string name="save_manager_loading">Reading the HDD…</string>
+  <string name="save_manager_storage">E: %1$s free of %2$s · %3$d games</string>
+  <string name="save_manager_empty">No game saves on this HDD yet.
+Play a game and save, or import a save backup ZIP.</string>
+  <string name="save_manager_no_hdd">No local HDD image is configured. Set one up in Settings first.</string>
+  <string name="save_manager_read_failed">Could not read the HDD: %1$s</string>
+  <string name="save_manager_title_details">%1$s · %2$s · %3$s</string>
+  <plurals name="save_manager_save_count">
+    <item quantity="one">%d save</item>
+    <item quantity="other">%d saves</item>
+  </plurals>
+  <string name="save_manager_save_details">%1$s · %2$s</string>
+  <string name="save_manager_no_save_folders">This game keeps its data in loose files rather than separate saves. Export or delete it as a whole below.</string>
+  <string name="save_manager_working">Working…</string>
+  <string name="save_manager_export_done">Saves exported</string>
+  <string name="save_manager_export_failed">Export failed: %1$s</string>
+  <string name="save_manager_import_done">Imported saves for %1$s</string>
+  <string name="save_manager_import_failed">Import failed: %1$s</string>
+  <string name="save_manager_delete_save_title">Delete save?</string>
+  <string name="save_manager_delete_save_message">"%1$s" from %2$s will be removed from the HDD. This cannot be undone unless you exported it.</string>
+  <string name="save_manager_delete_game_title">Delete all saves?</string>
+  <string name="save_manager_delete_game_message">Every save and cached file for %1$s will be removed from the HDD. This cannot be undone unless you exported them.</string>
+  <string name="save_manager_delete_done">Deleted</string>
+  <string name="save_manager_delete_failed">Delete failed: %1$s</string>
+  <string name="save_manager_nothing_to_export">There are no saves to export.</string>
+  <string name="save_manager_import_title">Import saves?</string>
+  <string name="save_manager_import_message">Saves in the ZIP are merged into the HDD. A save that already exists is replaced by the one in the ZIP.</string>
 </resources>

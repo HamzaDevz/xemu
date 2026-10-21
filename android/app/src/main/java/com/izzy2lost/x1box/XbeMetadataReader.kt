@@ -206,8 +206,11 @@ object XbeMetadataReader {
     return Metadata(titleId, name.toString().trim(), icon)
   }
 
-  /* Decodes an XPR0 bundle's first texture. Null for a format it doesn't know. */
-  private fun decodeTitleImage(xpr: ByteArray): Bitmap? {
+  /*
+   * Decodes an XPR0 bundle's first texture. Null for a format it doesn't know.
+   * The HDD's TitleImage.xbx and saveimage.xbx are the same kind of bundle.
+   */
+  internal fun decodeTitleImage(xpr: ByteArray): Bitmap? {
     val headerSize = 12
     val resourceData = headerSize + 4
     val resourceFormat = headerSize + 12
@@ -456,6 +459,14 @@ class XbeMetadataCache(context: Context) {
       dirty = true
     }
     return entry
+  }
+
+  /** Every game the library has read, by title id, for naming saves on the HDD. */
+  fun knownTitles(): Map<Long, Entry> {
+    synchronized(lock) {
+      loadIfNeeded()
+      return entries.values.filterNotNull().associateBy { it.titleId }
+    }
   }
 
   /** Forgets images no longer in the library and writes the index if it changed. */

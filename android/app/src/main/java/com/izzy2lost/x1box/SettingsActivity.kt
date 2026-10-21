@@ -563,6 +563,9 @@ class SettingsActivity : AppCompatActivity() {
     btnImportDashboard.setOnClickListener {
       showDashboardImportSourcePicker()
     }
+    findViewById<MaterialButton>(R.id.btn_manage_saves).setOnClickListener {
+      startActivity(Intent(this, SaveManagerActivity::class.java))
+    }
 
     fun persistSettings(): Pair<Int, Int> {
       val selectedDisplayMode = when (toggleDisplayMode.checkedButtonId) {
