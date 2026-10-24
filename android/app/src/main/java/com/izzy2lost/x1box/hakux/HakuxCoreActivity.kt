@@ -64,7 +64,10 @@ class HakuxCoreActivity : SDLActivity() {
 
   override fun getArguments(): Array<String> {
     val args = mutableListOf(discArg, File(filesDir, "hakux/hdd").absolutePath)
-    if (intent.getBooleanExtra(EXTRA_RELAUNCH, false)) {
+    val state = intent.getStringExtra(EXTRA_LOADSTATE)
+    if (state != null) {
+      args += "loadstate=$state"        /* boot into a savestate (HakuxSaveStates) */
+    } else if (intent.getBooleanExtra(EXTRA_RELAUNCH, false)) {
       args += "relaunch"
     }
     runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()?.let {
@@ -325,16 +328,47 @@ class HakuxCoreActivity : SDLActivity() {
       d.sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
   }
 
+  /** The game's savestates, kept by its disc. */
+  private val saveStates by lazy {
+    HakuxSaveStates(
+      this,
+      gameKey = discUri?.toString() ?: intent.getStringExtra(EXTRA_DVD_URI) ?: "",
+      showDialog = ::showMenuDialog,
+      captureFrame = ::captureFrame,
+      restartInto = ::restartInto,
+    )
+  }
+
+  /** The frame on screen, copied from the game's surface (null: it couldn't be). */
+  private fun captureFrame(done: (Bitmap?) -> Unit) {
+    val surface = mSurface
+    if (surface == null || surface.width <= 0 || surface.height <= 0) {
+      done(null)
+      return
+    }
+    val frame = Bitmap.createBitmap(surface.width, surface.height, Bitmap.Config.ARGB_8888)
+    try {
+      PixelCopy.request(surface, frame, { result -> done(if (result == PixelCopy.SUCCESS) frame else null) }, handler)
+    } catch (e: IllegalArgumentException) {
+      done(null)
+    }
+  }
+
   private fun showMenu() {
     onScreenController?.resetAllInputs()
     val shown = controlsShown ?: !hasGamepad()
-    val items = listOf<Pair<String, () -> Unit>>(
+    val items = mutableListOf<Pair<String, () -> Unit>>(
       getString(if (shown) R.string.hakux_menu_hide_controls else R.string.hakux_menu_show_controls) to {
         controlsShown = !shown
         updateControllerVisibility()
       },
-      getString(R.string.hakux_menu_exit) to ::exitGame,
     )
+    /* savestates: the core has them for push-buffer titles */
+    if (nativeStatesAvailable()) {
+      items += getString(R.string.hakux_menu_save_state) to { saveStates.showSlots(save = true) }
+      items += getString(R.string.hakux_menu_load_state) to { saveStates.showSlots(save = false) }
+    }
+    items += getString(R.string.hakux_menu_exit) to ::exitGame
     showMenuDialog(
       AlertDialog.Builder(this)
         .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
@@ -412,12 +446,19 @@ class HakuxCoreActivity : SDLActivity() {
     startRelaunch()
   }
 
-  private fun startRelaunch() {
+  /** Starts the core again into the savestate at path (HakuxSaveStates' Load state). */
+  private fun restartInto(path: String) {
+    Log.i(TAG, "savestate: starting the core again into $path")
+    startRelaunch(path)
+  }
+
+  private fun startRelaunch(state: String? = null) {
     if (relaunchStarted) return
     relaunchStarted = true
     startActivity(
       Intent(this, HakuxRelaunchActivity::class.java)
         .putExtra(EXTRA_DVD_URI, discUri?.toString() ?: intent.getStringExtra(EXTRA_DVD_URI))
+        .apply { if (state != null) putExtra(EXTRA_LOADSTATE, state) }
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
       HakuxRelaunchActivity.noTransition(this).toBundle(),
     )
@@ -492,6 +533,8 @@ class HakuxCoreActivity : SDLActivity() {
     const val EXTRA_DVD_URI = "dvdUri"
     /** Boot the XBE of the saved launch data page (a title's XLaunchNewImage). */
     const val EXTRA_RELAUNCH = "relaunch"
+    /** Boot into the savestate at this path (HakuxSaveStates' Load state). */
+    const val EXTRA_LOADSTATE = "loadstate"
 
     /* hakux/core/native/dev/usb.h NC_PAD_* */
     private const val PAD_UP = 0x01
@@ -527,5 +570,11 @@ class HakuxCoreActivity : SDLActivity() {
     )
     /** The emulation paused (onPause, a menu) or resumed. */
     @JvmStatic external fun nativeSetPaused(paused: Boolean)
+    /** Saves the running game to path (not on the UI thread): null, or why it couldn't. */
+    @JvmStatic external fun nativeSaveState(path: String): String?
+    /** Whether the savestate at path can load into this game: null, or why not. */
+    @JvmStatic external fun nativeStateCheck(path: String): String?
+    /** Savestates work for the running game (push-buffer mode). */
+    @JvmStatic external fun nativeStatesAvailable(): Boolean
   }
 }

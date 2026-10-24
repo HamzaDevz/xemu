@@ -516,5 +516,17 @@ Play a game and save, or import a save backup ZIP.</string>
   <string name="hakux_fatal_boot_title">Game could not start</string>
   <string name="hakux_fatal_boot">%1$s</string>
   <string name="hakux_sync_failed">Couldn\'t copy your saves from the hard disk for hakuX. The game runs, but without them.</string>
+  <string name="hakux_menu_save_state">Save state</string>
+  <string name="hakux_menu_load_state">Load state</string>
+  <string name="hakux_state_none">No savestates for this game yet</string>
+  <string name="hakux_state_saving">Saving slot %1$d…</string>
+  <string name="hakux_state_saved">Saved to slot %1$d</string>
+  <string name="hakux_state_save_failed">Savestate not saved</string>
+  <string name="hakux_state_load_failed">Savestate can\'t be loaded</string>
+  <string name="hakux_state_slot">Slot %1$d</string>
+  <string name="hakux_state_empty">Empty</string>
+  <string name="hakux_state_delete">Delete</string>
+  <string name="hakux_state_delete_title">Delete savestate?</string>
+  <string name="hakux_state_delete_message">Slot %1$d\'s savestate will be deleted.</string>
   <string name="hakux_shader_build">Building shaders %1$d / %2$d</string>
 </resources>

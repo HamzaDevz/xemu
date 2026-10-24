@@ -57,7 +57,12 @@ class HakuxRelaunchActivity : Activity() {
   private fun startCore() {
     val core = Intent(this, HakuxCoreActivity::class.java)
       .putExtra(HakuxCoreActivity.EXTRA_DVD_URI, intent.getStringExtra(HakuxCoreActivity.EXTRA_DVD_URI))
-      .putExtra(HakuxCoreActivity.EXTRA_RELAUNCH, true)
+      .apply {
+        /* a savestate's load, or the title's own reboot */
+        val state = intent.getStringExtra(HakuxCoreActivity.EXTRA_LOADSTATE)
+        if (state != null) putExtra(HakuxCoreActivity.EXTRA_LOADSTATE, state)
+        else putExtra(HakuxCoreActivity.EXTRA_RELAUNCH, true)
+      }
       .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
     startActivity(core, noTransition(this).toBundle())
     finish()
