@@ -4,7 +4,17 @@
  */
 package com.izzy2lost.x1box.hakux
 
-import android.app.AlertDialog
+import androidx.appcompat.app.AlertDialog
+import android.hardware.input.InputManager
+import android.view.Gravity
+import android.view.MotionEvent
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.izzy2lost.x1box.ControllerRemap
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -45,7 +55,7 @@ import org.libsdl.app.SDLActivity
  * arguments (getArguments) and is polled for what it reports: the frame
  * rate, a fatal error, the title leaving or rebooting into another XBE.
  */
-class HakuxCoreActivity : SDLActivity() {
+class HakuxCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
   private val handler = Handler(Looper.getMainLooper())
   private val prefs by lazy { getSharedPreferences("x1box_prefs", Context.MODE_PRIVATE) }
 
@@ -83,9 +93,8 @@ class HakuxCoreActivity : SDLActivity() {
       else -> "stretch"
     }
     args += "tz=${TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000}"
-    /* Player 1 only, from the first gamepad SDL sees plus the on-screen controls. */
+    /* Player 1: every physical controller (HakuxPadRouter) plus the on-screen controls. */
     args += "pads=1"
-    args += "padinput=sdl"
     vkDriverArg()?.let { args += it }
     return args.toTypedArray()
   }
@@ -118,7 +127,7 @@ class HakuxCoreActivity : SDLActivity() {
     setupOnScreenController()
     setupOverlayText()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { showMenu() }
+      onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { onBack() }
     }
   }
 
@@ -177,10 +186,14 @@ class HakuxCoreActivity : SDLActivity() {
     fpsView?.visibility = if (prefs.getBoolean("show_fps", false)) View.VISIBLE else View.GONE
     handler.removeCallbacks(poll)
     handler.postDelayed(poll, POLL_MS)
+    handler.removeCallbacks(rumble)
+    handler.postDelayed(rumble, RUMBLE_MS)
   }
 
   override fun onPause() {
     handler.removeCallbacks(poll)
+    handler.removeCallbacks(rumble)
+    router?.reset()
     activityPaused = true
     syncPause()
     super.onPause()
@@ -188,6 +201,7 @@ class HakuxCoreActivity : SDLActivity() {
 
   override fun onDestroy() {
     handler.removeCallbacksAndMessages(null)
+    (getSystemService(Context.INPUT_SERVICE) as InputManager).unregisterInputDeviceListener(this)
     super.onDestroy()
   }
 
@@ -245,7 +259,7 @@ class HakuxCoreActivity : SDLActivity() {
       FATAL_BOOT -> R.string.hakux_fatal_boot_title to getString(R.string.hakux_fatal_boot, why)
       else -> R.string.hakux_fatal_incompatible_title to getString(R.string.hakux_fatal_incompatible)
     }
-    AlertDialog.Builder(this)
+    MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_Xemu_RoundedDialog)
       .setTitle(title)
       .setMessage(message)
       .setCancelable(false)
@@ -307,8 +321,14 @@ class HakuxCoreActivity : SDLActivity() {
 
   // ---------------------------------------------------------------- controls and menu
 
+  private val controllerSettings by lazy { ControllerSettings(this) }
+  /** Physical controllers to player 1 through the app's remap (HakuxPadRouter). */
+  private var router: HakuxPadRouter? = null
+  private var touchLayoutToolbar: View? = null
+  private var menuDialog: androidx.appcompat.app.AlertDialog? = null
+
   private fun setupOnScreenController() {
-    val settings = ControllerSettings(this)
+    val settings = controllerSettings
     val overlay = OnScreenController(this).apply {
       layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
       alpha = settings.controllerOpacity
@@ -319,6 +339,8 @@ class HakuxCoreActivity : SDLActivity() {
     overlay.onMenuButtonTapped = { showMenu() }
     mLayout?.addView(overlay)
     onScreenController = overlay
+    router = HakuxPadRouter(ControllerRemap.load(this)) { b, a, lx, ly, rx, ry -> nativeSetPad(0, b, a, lx, ly, rx, ry) }
+    (getSystemService(Context.INPUT_SERVICE) as InputManager).registerInputDeviceListener(this, null)
     updateControllerVisibility()
   }
 
@@ -328,10 +350,35 @@ class HakuxCoreActivity : SDLActivity() {
     onScreenController?.visibility = if (shown) View.VISIBLE else View.GONE
   }
 
-  private fun hasGamepad(): Boolean = InputDevice.getDeviceIds().any { id ->
-    val d = InputDevice.getDevice(id) ?: return@any false
-    !d.isVirtual && (d.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-      d.sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
+  private fun hasGamepad(): Boolean =
+    InputDevice.getDeviceIds().any { HakuxPadRouter.isGamepad(InputDevice.getDevice(it)) }
+
+  override fun onInputDeviceAdded(deviceId: Int) = updateControllerVisibility()
+  override fun onInputDeviceChanged(deviceId: Int) = updateControllerVisibility()
+  override fun onInputDeviceRemoved(deviceId: Int) {
+    router?.forget(deviceId)
+    updateControllerVisibility()
+  }
+
+  /** The rumble the title asks for, on the controller used last. */
+  private var rumbleOn = false
+  private val rumble = object : Runnable {
+    override fun run() {
+      val v = nativeGetRumble(0)
+      val amp = (maxOf(v ushr 16, v and 0xFFFF) ushr 8).coerceIn(0, 255)
+      val dev = router?.lastDeviceId?.let { InputDevice.getDevice(it) }
+      if (dev != null && Build.VERSION.SDK_INT >= 31) {
+        val vib = dev.vibratorManager.defaultVibrator
+        if (amp > 0 && vib.hasVibrator()) {
+          vib.vibrate(android.os.VibrationEffect.createOneShot(RUMBLE_MS + 20, amp.coerceAtLeast(1)))
+          rumbleOn = true
+        } else if (rumbleOn) {
+          vib.cancel()
+          rumbleOn = false
+        }
+      }
+      handler.postDelayed(this, RUMBLE_MS)
+    }
   }
 
   /** The game's savestates, kept by its disc. */
@@ -361,47 +408,277 @@ class HakuxCoreActivity : SDLActivity() {
     }
   }
 
-  private fun showMenu() {
-    onScreenController?.resetAllInputs()
-    val shown = controlsShown ?: !hasGamepad()
-    val items = mutableListOf<Pair<String, () -> Unit>>(
-      getString(if (shown) R.string.hakux_menu_hide_controls else R.string.hakux_menu_show_controls) to {
-        controlsShown = !shown
-        updateControllerVisibility()
-      },
-    )
-    /* savestates: the core has them for push-buffer titles */
-    if (nativeStatesAvailable()) {
-      items += getString(R.string.hakux_menu_save_state) to { saveStates.showSlots(save = true) }
-      items += getString(R.string.hakux_menu_load_state) to { saveStates.showSlots(save = false) }
+  /** The game stops while [what] is up (a dialog, the layout editor); [over] lets it go on. */
+  private fun holdPause(): () -> Unit {
+    menuDialogs++
+    syncPause()
+    var released = false
+    return {
+      if (!released) {
+        released = true
+        menuDialogs--
+        syncPause()
+      }
     }
-    items += getString(R.string.hakux_menu_exit) to ::exitGame
-    showMenuDialog(
-      AlertDialog.Builder(this)
-        .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
-        .setNegativeButton(R.string.hakux_menu_resume, null)
-    )
+  }
+
+  /** The in-game menu, laid out as xemu's (MainActivity.showInGameMenu). */
+  private fun showMenu() {
+    if (menuDialog?.isShowing == true || touchLayoutToolbar != null) return
+    onScreenController?.resetAllInputs()
+    router?.reset()
+    val release = holdPause()
+
+    val dp = resources.displayMetrics.density
+    val spacing = (8 * dp).toInt()
+    lateinit var dialog: androidx.appcompat.app.AlertDialog
+    class Spec(val label: String, val action: () -> Unit)
+
+    fun button(spec: Spec) = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      text = spec.label
+      gravity = Gravity.CENTER
+      textAlignment = View.TEXT_ALIGNMENT_CENTER
+      isSingleLine = false
+      maxLines = 2
+      setOnClickListener {
+        spec.action()                   /* a dialog it opens holds the pause before the menu lets go */
+        dialog.dismiss()
+      }
+    }
+
+    fun row(parent: LinearLayout, vararg specs: Spec) {
+      parent.addView(LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        isBaselineAligned = false
+        layoutParams = LinearLayout.LayoutParams(
+          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).also { it.bottomMargin = spacing }
+        specs.forEachIndexed { i, spec ->
+          addView(button(spec).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).also { lp ->
+              if (i < specs.lastIndex) lp.marginEnd = spacing
+            }
+          })
+        }
+      })
+    }
+
+    val shown = onScreenController?.visibility == View.VISIBLE
+    val resume = Spec(getString(R.string.in_game_menu_resume)) {}
+    val touch = Spec(getString(if (shown) R.string.in_game_menu_hide_touch_controls else R.string.in_game_menu_show_touch_controls)) {
+      controlsShown = !shown
+      updateControllerVisibility()
+    }
+    val remap = Spec(getString(R.string.in_game_menu_remap_controller)) {
+      val done = holdPause()
+      ControllerRemap.showEditor(
+        this,
+        onChanged = { router?.setRemap(it) },
+        onDismiss = {
+          hideSystemBars()
+          done()
+        },
+      )
+    }
+    val layout = Spec(getString(R.string.in_game_menu_edit_touch_layout)) { startTouchLayoutEditor() }
+    val save = Spec(getString(R.string.in_game_menu_save_state)) { saveStates.showSlots(save = true) }
+    val load = Spec(getString(R.string.in_game_menu_load_state)) { saveStates.showSlots(save = false) }
+    val exit = Spec(getString(R.string.in_game_menu_exit_to_library)) { exitGame() }
+    val quit = Spec(getString(R.string.in_game_menu_quit_app)) { quitApp() }
+
+    val list = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding((20 * dp).toInt(), (12 * dp).toInt(), (20 * dp).toInt(), 0)
+      row(this, resume, touch)
+      row(this, remap, layout)
+      /* savestates: the core has them for push-buffer titles */
+      if (nativeStatesAvailable()) row(this, save, load)
+      row(this, exit, quit)
+    }
+    val scroll = androidx.core.widget.NestedScrollView(this).apply {
+      isFillViewport = true
+      overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+      addView(list, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+    dialog = MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_Xemu_RoundedDialog)
+      .setTitle(getString(R.string.in_game_menu_title))
+      .setView(scroll)
+      .setOnDismissListener {
+        menuDialog = null
+        hideSystemBars()
+        release()
+      }
+      .create()
+    menuDialog = dialog
+    dialog.show()
+  }
+
+  /** The layout editor over the game, paused meanwhile (MainActivity's). */
+  private var editorRelease: (() -> Unit)? = null
+
+  private fun startTouchLayoutEditor() {
+    val controller = onScreenController ?: return
+    val host = mLayout ?: return
+    editorRelease = holdPause()
+    controller.visibility = View.VISIBLE
+    controller.editMode = true
+
+    val dp = resources.displayMetrics.density
+    fun toolbarButton(label: String, onClick: () -> Unit) = MaterialButton(this).apply {
+      text = label
+      isAllCaps = false
+      minWidth = 0
+      minimumWidth = 0
+      setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
+      setOnClickListener { onClick() }
+      layoutParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+      ).also { it.marginEnd = (6 * dp).toInt() }
+    }
+    val opacitySteps = floatArrayOf(1.0f, 0.85f, 0.7f, 0.55f, 0.4f, 0.25f)
+    fun opacityLabel() = getString(R.string.touch_layout_opacity, (controller.alpha * 100).roundToInt())
+
+    val smaller = toolbarButton(getString(R.string.touch_layout_smaller)) { controller.scaleSelected(1f / 1.1f) }
+    val larger = toolbarButton(getString(R.string.touch_layout_larger)) { controller.scaleSelected(1.1f) }
+    val hide = toolbarButton(getString(R.string.touch_layout_hide)) { controller.toggleSelectedVisibility() }
+    lateinit var opacity: MaterialButton
+    opacity = toolbarButton(opacityLabel()) {
+      val i = opacitySteps.indexOfFirst { abs(it - controller.alpha) < 0.01f }
+      controller.alpha = opacitySteps[(i + 1) % opacitySteps.size]
+      controllerSettings.controllerOpacity = controller.alpha
+      opacity.text = opacityLabel()
+    }
+    val reset = toolbarButton(getString(R.string.touch_layout_reset)) {
+      MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_Xemu_RoundedDialog)
+        .setMessage(R.string.touch_layout_reset_message)
+        .setPositiveButton(R.string.touch_layout_reset) { _, _ ->
+          controller.resetLayout()
+          controller.alpha = 1f
+          controllerSettings.controllerOpacity = 1f
+          opacity.text = opacityLabel()
+        }
+        .setNegativeButton(android.R.string.cancel, null)
+        .setOnDismissListener { hideSystemBars() }
+        .show()
+    }
+    val done = toolbarButton(getString(R.string.touch_layout_done)) { finishTouchLayoutEditor() }
+
+    fun updateSelectionButtons(element: OnScreenController.Element?) {
+      val has = element != null
+      smaller.isEnabled = has
+      larger.isEnabled = has
+      hide.isEnabled = has
+      hide.text = getString(if (controller.isSelectedVisible()) R.string.touch_layout_hide else R.string.touch_layout_show)
+    }
+    controller.onSelectionChanged = ::updateSelectionButtons
+    updateSelectionButtons(null)
+
+    val row = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      setPadding((8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt())
+      setBackgroundColor(Color.argb(200, 20, 20, 20))
+      listOf(smaller, larger, hide, opacity, reset, done).forEach(::addView)
+    }
+    val toolbar = HorizontalScrollView(this).apply {
+      isHorizontalScrollBarEnabled = false
+      addView(row)
+    }
+    host.addView(toolbar, RelativeLayout.LayoutParams(
+      RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT,
+    ).apply {
+      addRule(RelativeLayout.ALIGN_PARENT_TOP)
+      addRule(RelativeLayout.CENTER_HORIZONTAL)
+      topMargin = (8 * dp).toInt()
+    })
+    touchLayoutToolbar = toolbar
+  }
+
+  private fun finishTouchLayoutEditor() {
+    val toolbar = touchLayoutToolbar ?: return
+    (toolbar.parent as? ViewGroup)?.removeView(toolbar)
+    touchLayoutToolbar = null
+    onScreenController?.apply {
+      onSelectionChanged = null
+      editMode = false
+    }
+    updateControllerVisibility()
+    hideSystemBars()
+    editorRelease?.invoke()
+    editorRelease = null
   }
 
   @Deprecated("Android 12 and older; newer ones call the OnBackInvokedCallback.")
-  override fun onBackPressed() = showMenu()
+  override fun onBackPressed() = onBack()
+
+  /** Back: leaves the layout editor, or opens (closes) the menu. */
+  private fun onBack() {
+    when {
+      touchLayoutToolbar != null -> finishTouchLayoutEditor()
+      menuDialog?.isShowing == true -> menuDialog?.dismiss()
+      else -> showMenu()
+    }
+  }
+
+  /* Start + Select together open the menu, as in xemu (MainActivity.handleGamepadMenuCombo). */
+  private var startDown = false
+  private var selectDown = false
+  private var comboTriggered = false
+
+  private fun menuCombo(event: KeyEvent): Boolean {
+    val start = event.keyCode == KeyEvent.KEYCODE_BUTTON_START
+    val select = event.keyCode == KeyEvent.KEYCODE_BUTTON_SELECT || event.keyCode == KeyEvent.KEYCODE_BACK
+    if (!start && !select) return false
+    when (event.action) {
+      KeyEvent.ACTION_DOWN -> {
+        if (start) startDown = true
+        if (select) selectDown = true
+        if (!comboTriggered && event.repeatCount == 0 && startDown && selectDown) {
+          comboTriggered = true
+          showMenu()
+          return true
+        }
+      }
+      KeyEvent.ACTION_UP -> {
+        if (start) startDown = false
+        if (select) selectDown = false
+        if (!startDown || !selectDown) comboTriggered = false
+      }
+    }
+    return comboTriggered
+  }
 
   /*
    * The system's back (navigation button, back swipe, a keyboard) opens the
-   * menu before SDL takes it and closes the game; a gamepad's own Back stays
-   * the game's, and its guide button opens the menu.
+   * menu before SDL takes it and closes the game; a gamepad's keys go to the
+   * game through the router, its guide button and Start + Select to the menu.
    */
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-    val fromPad = event.device?.let { it.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD } == true
+    val fromPad = HakuxPadRouter.isGamepad(event.device)
     if (event.keyCode == KeyEvent.KEYCODE_BACK && !fromPad) {
-      if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) showMenu()
+      if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) onBack()
       return true
     }
-    if (event.keyCode == KeyEvent.KEYCODE_BUTTON_MODE && fromPad) {
-      if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) showMenu()
-      return true
+    if (fromPad) {
+      if (event.keyCode == KeyEvent.KEYCODE_BUTTON_MODE) {
+        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) showMenu()
+        return true
+      }
+      if (menuCombo(event)) {
+        router?.reset()
+        return true
+      }
+      if (touchLayoutToolbar == null && router?.onKey(event) == true) {
+        return true
+      }
     }
     return super.dispatchKeyEvent(event)
+  }
+
+  override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+    if (touchLayoutToolbar == null && router?.onMotion(event) == true) {
+      return true
+    }
+    return super.dispatchGenericMotionEvent(event)
   }
 
   // ---------------------------------------------------------------- leaving
@@ -413,6 +690,12 @@ class HakuxCoreActivity : SDLActivity() {
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     )
     finish()
+    android.os.Process.killProcess(android.os.Process.myPid())
+  }
+
+  /** Out of the app: the game's process ends (its saves go back to the disk the next time the library opens). */
+  private fun quitApp() {
+    finishAndRemoveTask()
     android.os.Process.killProcess(android.os.Process.myPid())
   }
 
@@ -559,6 +842,7 @@ class HakuxCoreActivity : SDLActivity() {
     private const val FATAL_BOOT = 5
 
     private const val POLL_MS = 500L
+    private const val RUMBLE_MS = 50L
     private const val RELAUNCH_COPY_MS = 1000L
 
     /** fps, average frame time (ms), last frame time (ms), 1 if push-buffer decoding renders. */
@@ -575,6 +859,10 @@ class HakuxCoreActivity : SDLActivity() {
     @JvmStatic external fun nativeSetOverlayPad(
       buttons: Int, analog: Int, lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float,
     )
+    /** A player's Duke from its physical controllers (HakuxPadRouter): NC_PAD_* buttons, analog bytes, sticks. */
+    @JvmStatic external fun nativeSetPad(player: Int, buttons: Int, analog: Long, lx: Int, ly: Int, rx: Int, ry: Int)
+    /** The rumble the title last sent to a player: left << 16 | right. */
+    @JvmStatic external fun nativeGetRumble(player: Int): Int
     /** The emulation paused (onPause, a menu) or resumed. */
     @JvmStatic external fun nativeSetPaused(paused: Boolean)
     /** Saves the running game to path (not on the UI thread): null, or why it couldn't. */

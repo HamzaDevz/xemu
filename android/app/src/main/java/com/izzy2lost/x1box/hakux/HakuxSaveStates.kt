@@ -4,7 +4,8 @@
  */
 package com.izzy2lost.x1box.hakux
 
-import android.app.AlertDialog
+import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -106,7 +107,7 @@ class HakuxSaveStates(
     }
     val adapter = SlotAdapter(slots, deletable = !save)
     adapter.dialog = showDialog(
-      AlertDialog.Builder(activity)
+      MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_Xemu_RoundedDialog)
         .setTitle(if (save) R.string.hakux_menu_save_state else R.string.hakux_menu_load_state)
         .setAdapter(adapter) { _, i -> if (save) save(slots[i]) else load(slots[i]) }
         .setNegativeButton(android.R.string.cancel, null)
@@ -125,7 +126,7 @@ class HakuxSaveStates(
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
       })
     }
-    return showDialog(AlertDialog.Builder(activity).setView(row).setCancelable(false))
+    return showDialog(MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_Xemu_RoundedDialog).setView(row).setCancelable(false))
   }
 
   private fun save(slot: Int) {
@@ -137,7 +138,7 @@ class HakuxSaveStates(
         if (err != null) {
           progress.dismiss()
           showDialog(
-            AlertDialog.Builder(activity)
+            MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_Xemu_RoundedDialog)
               .setTitle(R.string.hakux_state_save_failed)
               .setMessage(err)
               .setPositiveButton(android.R.string.ok, null)
@@ -166,7 +167,7 @@ class HakuxSaveStates(
       activity.runOnUiThread {
         if (err != null) {
           showDialog(
-            AlertDialog.Builder(activity)
+            MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_Xemu_RoundedDialog)
               .setTitle(R.string.hakux_state_load_failed)
               .setMessage(err)
               .setPositiveButton(android.R.string.ok, null)
@@ -182,7 +183,7 @@ class HakuxSaveStates(
 
   private fun confirmDelete(slot: Int, onDeleted: () -> Unit) {
     showDialog(
-      AlertDialog.Builder(activity)
+      MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_Xemu_RoundedDialog)
         .setTitle(R.string.hakux_state_delete_title)
         .setMessage(activity.getString(R.string.hakux_state_delete_message, slot))
         .setPositiveButton(R.string.hakux_state_delete) { _, _ ->
