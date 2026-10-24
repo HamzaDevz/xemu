@@ -8,7 +8,9 @@
 #include "hw/xbox/hle/vk/vkdev.h"
 #include "hw/xbox/hle/vk/back.h"
 #include "hw/xbox/hle/vk/batch.h"
+#include "hw/xbox/hle/vk/compat.h"
 #include "hw/xbox/hle/vk/quirks.h"
+#include "hw/xbox/hle/shader/glsl_compile.h"
 
 HleVk g_hvk;
 static HleMutex g_queue_lock;
@@ -134,6 +136,193 @@ int hle_vk_memtype(uint32_t bits, VkMemoryPropertyFlags want,
         }
     }
     return -1;
+}
+
+/*
+ * x1box: a device without Vulkan 1.3's dynamic rendering, synchronization2
+ * and timeline semaphores, or without extended / vertex-input dynamic state
+ * (the Adreno 610's 1.1 driver): the features the back end needs from their
+ * Vulkan 1.1 extensions, and the compat layer (vk/compat.h) for the rest.
+ * logicOp, depth clip control and A4R4G4B4 go without (none is used beyond the
+ * floor; A4R4G4B4 textures are B4G4R4A4 swizzled).
+ */
+static int init_compat(HleVk *v, HleCaps *c, const VkExtensionProperties *ext, uint32_t ne,
+                       bool surface)
+{
+    bool e_bda = has_ext(ext, ne, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    bool e_di = has_ext(ext, ne, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    bool e_s2 = has_ext(ext, ne, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    bool e_c2 = has_ext(ext, ne, VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME);
+    bool e_hqr = has_ext(ext, ne, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME);
+    bool e_dem = has_ext(ext, ne, VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+    bool e_cbc = has_ext(ext, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+    bool e_pv = has_ext(ext, ne, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+    bool e_iu8x = has_ext(ext, ne, "VK_EXT_index_type_uint8");
+    bool e_iu8k = has_ext(ext, ne, "VK_KHR_index_type_uint8");
+    bool e_ahb = has_ext(ext, ne, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) &&
+                 has_ext(ext, ne, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+    bool e_4444 = has_ext(ext, ne, VK_EXT_4444_FORMATS_EXTENSION_NAME);
+
+    VkPhysicalDeviceBufferDeviceAddressFeatures q_bda = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+    VkPhysicalDeviceDescriptorIndexingFeatures q_di = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES };
+    VkPhysicalDeviceSynchronization2Features q_s2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES };
+    VkPhysicalDeviceHostQueryResetFeatures q_hqr = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES };
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures q_dem = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES };
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT q_cbc = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT };
+    VkPhysicalDeviceProvokingVertexFeaturesEXT q_pv = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT };
+    VkPhysicalDeviceIndexTypeUint8FeaturesEXT q_iu8 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT };
+    VkPhysicalDevice4444FormatsFeaturesEXT q_4444 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT };
+    VkPhysicalDeviceFeatures2 q = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    VkBaseOutStructure *tail = (VkBaseOutStructure *)&q;
+    if (e_bda) chain(&tail, &q_bda);
+    if (e_di) chain(&tail, &q_di);
+    if (e_s2) chain(&tail, &q_s2);
+    if (e_hqr) chain(&tail, &q_hqr);
+    if (e_dem) chain(&tail, &q_dem);
+    if (e_cbc) chain(&tail, &q_cbc);
+    if (e_pv) chain(&tail, &q_pv);
+    if (e_iu8x || e_iu8k) chain(&tail, &q_iu8);
+    if (e_4444) chain(&tail, &q_4444);
+    vkGetPhysicalDeviceFeatures2(v->phys, &q);
+
+    memset(c, 0, sizeof(*c));
+    c->floor_ok = true;
+    c->compat = true;
+    need(c, v->props.apiVersion >= VK_API_VERSION_1_1, "vulkan1.1");
+    need(c, v->qfam != UINT32_MAX, "graphics+compute queue");
+    c->wide_lines = q.features.wideLines;
+    need(c, q.features.largePoints, "largePoints");
+    need(c, q.features.dualSrcBlend, "dualSrcBlend");
+    need(c, q.features.depthClamp, "depthClamp");
+    need(c, q.features.textureCompressionBC, "textureCompressionBC");
+    need(c, e_bda && q_bda.bufferDeviceAddress, "bufferDeviceAddress");
+    need(c, e_di && q_di.runtimeDescriptorArray, "runtimeDescriptorArray");
+    need(c, e_di && q_di.descriptorBindingPartiallyBound, "partiallyBound");
+    need(c, e_di && q_di.descriptorBindingSampledImageUpdateAfterBind, "sampledImageUAB");
+    need(c, e_s2 && q_s2.synchronization2, "synchronization2");
+    need(c, e_c2, "copy_commands2");
+    need(c, e_cbc && q_cbc.customBorderColors && q_cbc.customBorderColorWithoutFormat,
+         "custom_border_color");
+    need(c, e_pv && q_pv.provokingVertexLast, "provoking_vertex");
+    need(c, (e_iu8x || e_iu8k) && q_iu8.indexTypeUint8, "index_type_uint8");
+    need(c, e_ahb, "AHB external memory");
+    c->fmt4444 = e_4444 && q_4444.formatA4R4G4B4;
+    c->aniso = q.features.samplerAnisotropy;
+    c->host_query_reset = e_hqr && q_hqr.hostQueryReset;
+    c->occl_precise = q.features.occlusionQueryPrecise;
+    c->swapchain = surface && has_ext(ext, ne, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    /* gpl, eds3, descriptor buffers, local read / fbfetch, executable
+     * properties and cache-only builds: none under the layer */
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(v->phys, VK_FORMAT_R16G16_SSCALED, &fp);
+    c->sscaled = fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+    if (!c->floor_ok) {
+        hle_log("hakuX-hle-back", "vk: compat floor not met on \"%s\": missing %s",
+                v->props.deviceName, c->missing);
+        snprintf(g_hle_unavailable, sizeof(g_hle_unavailable), "%s lacks %s", v->props.deviceName,
+                 c->missing);
+        vkDestroyInstance(v->inst, NULL);
+        v->inst = VK_NULL_HANDLE;
+        return -2;
+    }
+
+    VkPhysicalDeviceBufferDeviceAddressFeatures f_bda = {
+        .sType = q_bda.sType, .bufferDeviceAddress = VK_TRUE };
+    VkPhysicalDeviceDescriptorIndexingFeatures f_di = {
+        .sType = q_di.sType, .runtimeDescriptorArray = VK_TRUE,
+        .descriptorBindingPartiallyBound = VK_TRUE,
+        .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE,
+        .shaderSampledImageArrayNonUniformIndexing = q_di.shaderSampledImageArrayNonUniformIndexing };
+    VkPhysicalDeviceSynchronization2Features f_s2 = {
+        .sType = q_s2.sType, .synchronization2 = VK_TRUE };
+    VkPhysicalDeviceHostQueryResetFeatures f_hqr = {
+        .sType = q_hqr.sType, .hostQueryReset = VK_TRUE };
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures f_dem = {
+        .sType = q_dem.sType, .shaderDemoteToHelperInvocation = VK_TRUE };
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT f_cbc = {
+        .sType = q_cbc.sType, .customBorderColors = VK_TRUE, .customBorderColorWithoutFormat = VK_TRUE };
+    VkPhysicalDeviceProvokingVertexFeaturesEXT f_pv = {
+        .sType = q_pv.sType, .provokingVertexLast = VK_TRUE };
+    VkPhysicalDeviceIndexTypeUint8FeaturesEXT f_iu8 = {
+        .sType = q_iu8.sType, .indexTypeUint8 = VK_TRUE };
+    VkPhysicalDevice4444FormatsFeaturesEXT f_4444 = {
+        .sType = q_4444.sType, .formatA4R4G4B4 = VK_TRUE };
+    VkPhysicalDeviceFeatures2 f = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    f.features.wideLines = c->wide_lines;
+    f.features.largePoints = VK_TRUE;
+    f.features.dualSrcBlend = f.features.depthClamp = VK_TRUE;
+    f.features.textureCompressionBC = VK_TRUE;
+    f.features.samplerAnisotropy = c->aniso;
+    f.features.occlusionQueryPrecise = c->occl_precise;
+    tail = (VkBaseOutStructure *)&f;
+    chain(&tail, &f_bda);
+    chain(&tail, &f_di);
+    chain(&tail, &f_s2);
+    chain(&tail, &f_cbc);
+    chain(&tail, &f_pv);
+    chain(&tail, &f_iu8);
+    if (c->host_query_reset) chain(&tail, &f_hqr);
+    if (e_dem && q_dem.shaderDemoteToHelperInvocation) chain(&tail, &f_dem);
+    if (c->fmt4444) chain(&tail, &f_4444);
+
+    const char *exts[24];
+    uint32_t nx = 0;
+    exts[nx++] = VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
+    exts[nx++] = VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME;
+    exts[nx++] = VK_KHR_MAINTENANCE_3_EXTENSION_NAME;
+    exts[nx++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
+    exts[nx++] = VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME;
+    exts[nx++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
+    exts[nx++] = VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
+    exts[nx++] = e_iu8k ? "VK_KHR_index_type_uint8" : "VK_EXT_index_type_uint8";
+    exts[nx++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
+    exts[nx++] = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME;
+    if (c->host_query_reset) exts[nx++] = VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME;
+    if (e_dem && q_dem.shaderDemoteToHelperInvocation) exts[nx++] = VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME;
+    if (c->fmt4444) exts[nx++] = VK_EXT_4444_FORMATS_EXTENSION_NAME;
+    if (c->swapchain) exts[nx++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (has_ext(ext, ne, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
+        exts[nx++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+    }
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = v->qfam, .queueCount = 1, .pQueuePriorities = &prio };
+    VkDeviceCreateInfo dci = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f,
+        .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+        .enabledExtensionCount = nx, .ppEnabledExtensionNames = exts };
+    VkResult r = vkCreateDevice(v->phys, &dci, NULL, &v->dev);
+    if (r != VK_SUCCESS) {
+        hle_log("hakuX-hle-back", "vk: vkCreateDevice (compat) failed (%d)", r);
+        vkDestroyInstance(v->inst, NULL);
+        v->inst = VK_NULL_HANDLE;
+        v->dev = VK_NULL_HANDLE;
+        return -1;
+    }
+    volkLoadDeviceTable(&v->t, v->dev);
+    hle_compat_install(&v->t, v->dev);  /* under the batching: it sees the real draws */
+    hle_batch_install(&v->t);
+    hle_glsl_set_vulkan11(true);        /* SPIR-V 1.3, as a 1.1 driver takes */
+    v->t.vkGetDeviceQueue(v->dev, v->qfam, 0, &v->queue);
+    v->get_ahb_props = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)
+        vkGetDeviceProcAddr(v->dev, "vkGetAndroidHardwareBufferPropertiesANDROID");
+    hle_log("hakuX-hle-back", "vk: device \"%s\" api %u.%u.%u driver 0x%x floor=ok (compat layer) "
+            "4444=%d sscaled=%d host_query_reset=%d swapchain=%d",
+            v->props.deviceName, VK_API_VERSION_MAJOR(v->props.apiVersion),
+            VK_API_VERSION_MINOR(v->props.apiVersion), VK_API_VERSION_PATCH(v->props.apiVersion),
+            v->props.driverVersion, c->fmt4444, c->sscaled, c->host_query_reset, c->swapchain);
+    hle_quirks_init(v->phys);
+    return 0;
 }
 
 int hle_vk_init(void)
@@ -277,8 +466,19 @@ int hle_vk_init(void)
     if (e_lr) chain(&tail, &q_lr);
     vkGetPhysicalDeviceFeatures2(v->phys, &q);
 
+    /* Short of the 1.3 back end's dynamic rendering, synchronization2,
+     * timeline semaphores or dynamic states: the compat layer (x1box).
+     * HAKUX_HLE_COMPAT=1 (debug.hakux.env) takes it on any device, for tests. */
+    const char *force_compat = getenv("HAKUX_HLE_COMPAT");
+    if (v->props.apiVersion < VK_API_VERSION_1_3 || !q13.dynamicRendering || !q13.synchronization2 ||
+        !q12.timelineSemaphore || !(e_vids && q_vids.vertexInputDynamicState) ||
+        !(e_eds2 && q_eds2.extendedDynamicState2) || (force_compat && atoi(force_compat))) {
+        return init_compat(v, c, ext, ne, nix != 0);
+    }
+
     memset(c, 0, sizeof(*c));
     c->floor_ok = true;
+    c->fmt4444 = true;
     need(c, v->props.apiVersion >= VK_API_VERSION_1_3, "vulkan1.3");
     need(c, v->qfam != UINT32_MAX, "graphics+compute queue");
     c->wide_lines = q.features.wideLines;

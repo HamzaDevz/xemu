@@ -61,6 +61,7 @@ add_library(hakux_hle STATIC
   ${NC_HLE}/vk/display.c
   ${NC_HLE}/vk/swapchain.c
   ${NC_HLE}/vk/batch.c
+  ${NC_HLE}/vk/compat.c
   ${NC_HLE}/vk/draw.c
   ${NC_HLE}/vk/quirks.c
   ${NC_HLE}/vk/gamma.c

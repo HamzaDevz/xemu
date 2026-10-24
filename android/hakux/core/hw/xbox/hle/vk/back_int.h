@@ -145,6 +145,9 @@ void hle_draw_rec_begin(VkCommandBuffer cb);
 /* The command buffer's pipeline / dynamic state is no longer what the draws
  * recorded: a new command buffer, or another pipeline bound into it. */
 void hle_draw_state_lost(void);
+/* x1box: the push buffer's part for this frame slot (draw.c, devices with
+ * small push constants): its last use has completed. */
+void hle_draw_push_slot(unsigned slot);
 void hle_draw_ff_diag(void);
 /* Retired textures: destroyed once the timeline reaches their last use;
  * parked ones get the value of the submit that closes the recording. */

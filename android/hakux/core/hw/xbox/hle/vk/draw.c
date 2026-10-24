@@ -221,6 +221,12 @@ static bool tex_format(uint32_t x, TexFmt *o)
         o->fmt = VK_FORMAT_A1R5G5B5_UNORM_PACK16; o->sw.a = VK_COMPONENT_SWIZZLE_ONE;
         return true;
     case HLE_XFMT_A4R4G4B4: case HLE_XFMT_LIN_A4R4G4B4:
+        if (!g_hvk.caps.fmt4444) {
+            /* x1box: without VK_EXT_4444_formats, the same 16 bits as B4G4R4A4
+             * (b = A, g = R, r = G, a = B) swizzled back */
+            VkComponentMapping m = SW(G, R, A, B);
+            o->fmt = VK_FORMAT_B4G4R4A4_UNORM_PACK16; o->sw = m; return true;
+        }
         o->fmt = VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT; return true;
     case HLE_XFMT_L8: case HLE_XFMT_LIN_L8: {
         VkComponentMapping m = SW(R, R, R, ONE);
@@ -368,6 +374,112 @@ static bool make_image(HleVkTex *t, const TexFmt *tf, VkImageUsageFlags usage)
 
 static void pipe_async_init(void);
 
+/*
+ * x1box: HleFfPush in a storage buffer, for devices whose push constants hold
+ * fewer than its 256 bytes (the Adreno 610's 128). The shaders' block becomes
+ * a std430 buffer at set 2 (glsl_compile.c rewrites HLE_PUSH_GLSL); each push
+ * writes the block into this frame slot's part of a ring and binds it there
+ * (a dynamic offset). A slot's part is written again once its submission has
+ * completed (hle_draw_push_slot, as batch.c's indices).
+ */
+#define PCB_SET 2u
+#define PCB_SLOT_BYTES (4u << 20)       /* 16k changed blocks a frame */
+static struct {
+    bool on;
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    uint8_t *map;
+    VkDescriptorSetLayout dsl;
+    VkDescriptorPool pool;
+    VkDescriptorSet set;
+    uint32_t slot_base, pos, full;
+} g_pcb;
+
+static bool pcb_init(void)
+{
+    const VkDeviceSize size = (VkDeviceSize)HLE_FRAMES * PCB_SLOT_BYTES;
+    VkBufferCreateInfo bci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    if (T.vkCreateBuffer(g_hvk.dev, &bci, NULL, &g_pcb.buf) != VK_SUCCESS) {
+        return false;
+    }
+    VkMemoryRequirements req;
+    T.vkGetBufferMemoryRequirements(g_hvk.dev, g_pcb.buf, &req);
+    VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    int mt = hle_vk_memtype(req.memoryTypeBits, hv | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (mt < 0) {
+        mt = hle_vk_memtype(req.memoryTypeBits, hv, 0);
+    }
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = req.size, .memoryTypeIndex = (uint32_t)mt };
+    if (mt < 0 || T.vkAllocateMemory(g_hvk.dev, &mai, NULL, &g_pcb.mem) != VK_SUCCESS) {
+        return false;
+    }
+    T.vkBindBufferMemory(g_hvk.dev, g_pcb.buf, g_pcb.mem, 0);
+    if (T.vkMapMemory(g_hvk.dev, g_pcb.mem, 0, size, 0, (void **)&g_pcb.map) != VK_SUCCESS) {
+        return false;
+    }
+    VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1,
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo lci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b };
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 };
+    VkDescriptorPoolCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
+        .poolSizeCount = 1, .pPoolSizes = &ps };
+    if (T.vkCreateDescriptorSetLayout(g_hvk.dev, &lci, NULL, &g_pcb.dsl) != VK_SUCCESS ||
+        T.vkCreateDescriptorPool(g_hvk.dev, &pci, NULL, &g_pcb.pool) != VK_SUCCESS) {
+        return false;
+    }
+    VkDescriptorSetAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = g_pcb.pool, .descriptorSetCount = 1, .pSetLayouts = &g_pcb.dsl };
+    if (T.vkAllocateDescriptorSets(g_hvk.dev, &ai, &g_pcb.set) != VK_SUCCESS) {
+        return false;
+    }
+    VkDescriptorBufferInfo bi = { g_pcb.buf, 0, sizeof(HleFfPush) };
+    VkWriteDescriptorSet w = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_pcb.set, .dstBinding = 0,
+        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
+        .pBufferInfo = &bi };
+    T.vkUpdateDescriptorSets(g_hvk.dev, 1, &w, 0, NULL);
+    hle_glsl_set_push_ssbo(PCB_SET);
+    g_pcb.on = true;
+    hle_log("hakuX-hle-back", "push constants: %zu bytes > device limit %u: a storage buffer "
+            "(set %u, %u KiB a frame slot)", sizeof(HleFfPush),
+            g_hvk.props.limits.maxPushConstantsSize, PCB_SET, PCB_SLOT_BYTES / 1024);
+    return true;
+}
+
+void hle_draw_push_slot(unsigned slot)
+{
+    g_pcb.slot_base = (slot % HLE_FRAMES) * PCB_SLOT_BYTES;
+    g_pcb.pos = 0;
+}
+
+/* HleFfPush to the shaders: push constants, or the storage buffer's next block. */
+static void push_pc(VkCommandBuffer cb, const HleFfPush *pc)
+{
+    if (!g_pcb.on) {
+        T.vkCmdPushConstants(cb, g_dr.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                             0, sizeof(*pc), pc);
+        return;
+    }
+    if (g_pcb.pos + sizeof(*pc) > PCB_SLOT_BYTES) {
+        if (!g_pcb.full++) {
+            hle_log("hakuX-hle-back", "push buffer: a frame slot's %u KiB are full", PCB_SLOT_BYTES / 1024);
+        }
+        g_pcb.pos -= sizeof(*pc);       /* the last block again: wrong constants, not a fault */
+    }
+    const uint32_t off = g_pcb.slot_base + g_pcb.pos;
+    memcpy(g_pcb.map + off, pc, sizeof(*pc));
+    g_pcb.pos += sizeof(*pc);
+    T.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_dr.layout, PCB_SET, 1, &g_pcb.set,
+                              1, &off);
+}
+
 int hle_draw_init(void)
 {
     VkDescriptorSetLayoutBinding b[4] = {
@@ -445,7 +557,8 @@ int hle_draw_init(void)
                       offsetof(HleFfPush, bumpl) != 100 || offsetof(HleFfPush, alpha_ref) != 112 ||
                       offsetof(HleFfPush, fog) != 128 || offsetof(HleFfPush, bump) != 240 ||
                       sizeof(HleFfPush) != 256);
-    if (sizeof(HleFfPush) > g_hvk.props.limits.maxPushConstantsSize) {
+    if (sizeof(HleFfPush) > g_hvk.props.limits.maxPushConstantsSize &&
+        (g_hvk.caps.fbfetch || !pcb_init())) {
         hle_log("hakuX-hle-back", "push constants: %zu bytes > device limit %u",
                 sizeof(HleFfPush), g_hvk.props.limits.maxPushConstantsSize);
         return -1;
@@ -466,11 +579,11 @@ int hle_draw_init(void)
             g_hvk.caps.fbfetch = false;
         }
     }
-    VkDescriptorSetLayout sets[3] = { g_dr.dsl, g_dr.cdsl, g_dr.fbdsl };
+    VkDescriptorSetLayout sets[3] = { g_dr.dsl, g_dr.cdsl, g_pcb.on ? g_pcb.dsl : g_dr.fbdsl };
     VkPipelineLayoutCreateInfo lci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = g_hvk.caps.fbfetch ? 3 : 2,
-        .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+        .setLayoutCount = g_hvk.caps.fbfetch || g_pcb.on ? 3 : 2,
+        .pSetLayouts = sets, .pushConstantRangeCount = g_pcb.on ? 0 : 1, .pPushConstantRanges = &pr };
     if (T.vkCreatePipelineLayout(g_hvk.dev, &lci, NULL, &g_dr.layout) != VK_SUCCESS) {
         return -1;
     }
@@ -3362,9 +3475,7 @@ void hle_draw_cmd_draw(const HleCmdDraw *c, VkCommandBuffer cb, uint32_t rt_id, 
                 (aax > 1.0f || aay > 1.0f ? HLE_TEXEL_EDGE_FLAG : 0u) | (g_snap_trunc ? HLE_SNAP_TRUNC_FLAG : 0u);
     if (!g_rec.valid || memcmp(&g_rec.pc, &pc, sizeof(pc))) {
         g_rec.pc = pc;
-        T.vkCmdPushConstants(cb, g_dr.layout,
-                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                             sizeof(pc), &pc);
+        push_pc(cb, &pc);
         g_dr.emits[EM_PC]++;
     }
     /* raster / depth / stencil */

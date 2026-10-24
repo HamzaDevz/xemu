@@ -31,6 +31,7 @@
 #include "hw/xbox/hle/hle.h"
 #include "hw/xbox/hle/shader/glsl_compile.h"
 #include "hw/xbox/hle/vk/back_int.h"
+#include "hw/xbox/hle/vk/compat.h"
 #include "hw/xbox/hle/vk/display.h"
 #include "hw/xbox/hle/vk/swapchain.h"
 
@@ -367,7 +368,11 @@ static VkPipeline pipeline(VkShaderModule fs, VkFormat fmt)
 
 static bool init(void)
 {
-    volkLoadDeviceTable(&g_ps.t, g_hvk.dev);
+    if (hle_compat_on()) {
+        g_ps.t = *hle_compat_table();   /* x1box: a 1.1 device's entry points are the layer's */
+    } else {
+        volkLoadDeviceTable(&g_ps.t, g_hvk.dev);
+    }
     VkSemaphoreTypeCreateInfo tci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                       .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE };
     VkSemaphoreCreateInfo tsi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &tci };

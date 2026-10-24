@@ -27,6 +27,7 @@
 #include "hw/xbox/hle/vk/pcache.h"
 #include "hw/xbox/hle/vk/pipeasync.h"
 #include "hw/xbox/hle/vk/vkdev.h"
+#include "hw/xbox/hle/shader/glsl_compile.h"
 
 #define T (g_hvk.t)
 #define SPV_MAGIC   0x56505348u     /* "HSPV" */
@@ -204,6 +205,9 @@ static uint32_t *spv_read(HleShaderStage stage, const char *src, size_t *nwords,
 {
     size_t len = strlen(src);
     uint64_t key = fnv64(src, len, 0xcbf29ce484222325ull) ^ (uint64_t)stage;
+    if (hle_glsl_vulkan11()) {
+        key ^= 0x5350563133000000ull;   /* x1box: SPIR-V 1.3 builds apart from 1.6's */
+    }
     uint64_t check = fnv64(src, len, 0x84222325cbf29ce4ull);
     *check_out = check;
     *path = g_pc.dir ? g_strdup_printf("%s/%016llx-%d.spv", g_pc.dir,

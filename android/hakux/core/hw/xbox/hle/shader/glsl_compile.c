@@ -168,9 +168,43 @@ static size_t strip_ia_depth(uint32_t *w, size_t n)
     return o;
 }
 
+static bool g_vk11;
+static int g_push_set = -1;
+
+void hle_glsl_set_push_ssbo(unsigned set)
+{
+    g_push_set = (int)set;
+}
+
+void hle_glsl_set_vulkan11(bool on)
+{
+    g_vk11 = on;
+}
+
+bool hle_glsl_vulkan11(void)
+{
+    return g_vk11 || g_push_set >= 0;
+}
+
+/* src with HLE_PUSH_GLSL's push-constant block as a storage buffer (g_free), or NULL. */
+static char *push_as_ssbo(const char *src)
+{
+    static const char from[] = "layout(push_constant, std430) uniform Push {";
+    const char *at = g_push_set >= 0 ? strstr(src, from) : NULL;
+    if (!at) {
+        return NULL;
+    }
+    return g_strdup_printf("%.*slayout(set = %d, binding = 0, std430) readonly buffer Push {%s",
+                           (int)(at - src), src, g_push_set, at + sizeof(from) - 1);
+}
+
 uint32_t *hle_glsl_compile(HleShaderStage stage, const char *src,
                            size_t *nwords)
 {
+    g_autofree char *ssbo_src = push_as_ssbo(src);
+    if (ssbo_src) {
+        src = ssbo_src;
+    }
     glslang_stage_t st = stage == HLE_SHADER_VERTEX ? GLSLANG_STAGE_VERTEX :
                          stage == HLE_SHADER_FRAGMENT ? GLSLANG_STAGE_FRAGMENT :
                          GLSLANG_STAGE_COMPUTE;
@@ -178,9 +212,9 @@ uint32_t *hle_glsl_compile(HleShaderStage stage, const char *src,
         .language = GLSLANG_SOURCE_GLSL,
         .stage = st,
         .client = GLSLANG_CLIENT_VULKAN,
-        .client_version = GLSLANG_TARGET_VULKAN_1_3,
+        .client_version = g_vk11 ? GLSLANG_TARGET_VULKAN_1_1 : GLSLANG_TARGET_VULKAN_1_3,
         .target_language = GLSLANG_TARGET_SPV,
-        .target_language_version = GLSLANG_TARGET_SPV_1_6,
+        .target_language_version = g_vk11 ? GLSLANG_TARGET_SPV_1_3 : GLSLANG_TARGET_SPV_1_6,
         .code = src,
         .default_version = 450,
         .default_profile = GLSLANG_NO_PROFILE,

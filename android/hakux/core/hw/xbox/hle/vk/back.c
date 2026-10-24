@@ -496,6 +496,7 @@ static VkCommandBuffer cb_get(void)
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
         T.vkBeginCommandBuffer(f->cb, &bi);
         hle_batch_slot(g_back.cur);     /* this slot's indices: its last use has completed */
+        hle_draw_push_slot(g_back.cur);
         {   /* Earlier submissions' writes before this one's commands: a frame
              * split by a kick resumes its pass here and loads the attachments
              * the last submission stored. Submission order orders execution,
