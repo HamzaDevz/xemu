@@ -346,6 +346,7 @@ class SettingsActivity : AppCompatActivity() {
     EdgeToEdgeHelper.applySystemBarPadding(findViewById(R.id.settings_scroll))
 
     val toggleGraphicsApi = findViewById<MaterialButtonToggleGroup>(R.id.toggle_graphics_api)
+    val toggleCore = findViewById<MaterialButtonToggleGroup>(R.id.toggle_core)
     val toggleFiltering   = findViewById<MaterialButtonToggleGroup>(R.id.toggle_filtering)
     val toggleScale       = findViewById<MaterialButtonToggleGroup>(R.id.toggle_resolution_scale)
     val btn1x             = findViewById<MaterialButton>(R.id.btn_scale_1x)
@@ -422,6 +423,12 @@ class SettingsActivity : AppCompatActivity() {
     updateEmulatorFilesActionState()
 
     // Load current values
+    if (prefs.getString(HakuxLaunch.PREF_CORE, HakuxLaunch.CORE_XEMU) == HakuxLaunch.CORE_HAKUX) {
+      toggleCore.check(R.id.btn_core_hakux)
+    } else {
+      toggleCore.check(R.id.btn_core_xemu)
+    }
+
     val renderer = prefs.getString("setting_renderer", "vulkan") ?: "vulkan"
     if (renderer == "opengl") {
       toggleGraphicsApi.check(R.id.btn_renderer_opengl)
@@ -633,6 +640,10 @@ class SettingsActivity : AppCompatActivity() {
         .putString("setting_audio_driver", selectedAudioDriver)
         .putString("setting_filtering", selectedFiltering)
         .putString("setting_renderer", selectedRenderer)
+        .putString(
+          HakuxLaunch.PREF_CORE,
+          if (toggleCore.checkedButtonId == R.id.btn_core_hakux) HakuxLaunch.CORE_HAKUX else HakuxLaunch.CORE_XEMU,
+        )
 
       edit.apply()
       DebugLog.setEnabled(

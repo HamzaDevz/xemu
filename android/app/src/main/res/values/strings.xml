@@ -496,4 +496,24 @@ Play a game and save, or import a save backup ZIP.</string>
   <string name="save_manager_nothing_to_export">There are no saves to export.</string>
   <string name="save_manager_import_title">Import saves?</string>
   <string name="save_manager_import_message">Saves in the ZIP are merged into the HDD. A save that already exists is replaced by the one in the ZIP.</string>
+  <!-- The second core (android/hakux) -->
+  <string name="settings_core">Emulation core</string>
+  <string name="settings_core_help">hakuX runs games without emulating the whole console: much faster, but only some games work, and there is no dashboard, Chihiro or System Link.</string>
+  <string name="settings_core_xemu">xemu (full console, best compatibility)</string>
+  <string name="settings_core_hakux">hakuX (fast, fewer games)</string>
+  <string name="settings_core_xemu_short">xemu</string>
+  <string name="settings_core_hakux_short">hakuX</string>
+  <string name="hakux_menu_resume">Resume</string>
+  <string name="hakux_menu_show_controls">Show on-screen controls</string>
+  <string name="hakux_menu_hide_controls">Hide on-screen controls</string>
+  <string name="hakux_menu_exit">Exit game</string>
+  <string name="hakux_fatal_driver_title">GPU driver not supported</string>
+  <string name="hakux_fatal_driver">The hakuX core needs Vulkan features this GPU driver does not have:\n\n%1$s\n\nTry another driver, or the xemu core for this game.</string>
+  <string name="hakux_fatal_incompatible_title">Game not supported by hakuX</string>
+  <string name="hakux_fatal_incompatible">The hakuX core can\'t run this game yet. Switch it to the xemu core in its per-game settings.</string>
+  <string name="hakux_fatal_gpu_lost_title">GPU stopped responding</string>
+  <string name="hakux_fatal_gpu_lost">The GPU driver reset while running this game:\n\n%1$s</string>
+  <string name="hakux_fatal_boot_title">Game could not start</string>
+  <string name="hakux_fatal_boot">%1$s</string>
+  <string name="hakux_shader_build">Building shaders %1$d / %2$d</string>
 </resources>

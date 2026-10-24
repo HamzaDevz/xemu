@@ -1912,6 +1912,13 @@ class GameLibraryActivity : AppCompatActivity() {
       .putBoolean("skip_game_picker", false)
       .commit()
 
+    // The game's core (its per-game override, else the global choice). The
+    // hakuX core reads its disc from the intent; a local path has no URI to give it.
+    if (dvdUri != null && HakuxLaunch.selectedCore(this) == HakuxLaunch.CORE_HAKUX) {
+      HakuxLaunch.launch(this, dvdUri)
+      return
+    }
+
     EmulationProcessHandoff.launch(this, Intent(this, MainActivity::class.java))
   }
 

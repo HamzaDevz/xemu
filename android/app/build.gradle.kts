@@ -45,6 +45,25 @@ val localCmakeArguments = listOf(
 val vulkanValidationJniLibs =
   providers.environmentVariable("XEMU_VVL_JNILIBS").orNull
 
+/*
+ * The second, QEMU-free core (hakuX: FEX + an HLE Xbox kernel + an HLE GPU),
+ * built by android/hakux/build-core.sh into build/hakux-jniLibs. It needs the
+ * FEX fork with the system-mode API (X1BOX_FEX_DIR, or ../../FEX next to the
+ * repository). -Px1box.hakux=false leaves it out.
+ */
+val hakuxCoreEnabled = (findProperty("x1box.hakux") as String?)?.toBoolean() ?: true
+val hakuxJniLibs = layout.buildDirectory.dir("hakux-jniLibs").get().asFile
+val buildHakuxCore by tasks.registering(Exec::class) {
+  description = "Builds libhakuxcore.so (android/hakux)"
+  val script = rootProject.file("hakux/build-core.sh")
+  commandLine("bash", script.absolutePath, "Release")
+  val ndkDir = androidComponents.sdkComponents.ndkDirectory
+  doFirst { environment("ANDROID_NDK_HOME", ndkDir.get().asFile.absolutePath) }
+  inputs.dir(rootProject.file("hakux/core"))
+  inputs.file(script)
+  outputs.file(File(hakuxJniLibs, "arm64-v8a/libhakuxcore.so"))
+}
+
 android {
   namespace = "com.izzy2lost.x1box"
   compileSdk = 36
@@ -144,6 +163,11 @@ android {
     sourceSets.getByName("profile").jniLibs.directories += vulkanValidationJniLibs
   }
 
+  /* The hakuX core (android/hakux, GPLv3): its own native build, packed from here. */
+  if (hakuxCoreEnabled) {
+    sourceSets.getByName("main").jniLibs.directories += hakuxJniLibs.absolutePath
+  }
+
   externalNativeBuild {
     cmake {
       path = file("src/main/cpp/CMakeLists.txt")
@@ -192,5 +216,12 @@ androidComponents {
     if (variant.buildType != "release") {
       variant.packaging.jniLibs.keepDebugSymbols.add("**/*.so")
     }
+  }
+}
+
+if (hakuxCoreEnabled) {
+  /* Every task that reads jniLibs sees the freshly built core. */
+  tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
+    dependsOn(buildHakuxCore)
   }
 }
