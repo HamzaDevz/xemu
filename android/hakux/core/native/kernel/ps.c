@@ -60,6 +60,7 @@
 #define STACK_REGION   0xD0000000u
 #define STACK_GUARD    0x10000u
 #define DEFAULT_STACK  0x10000u
+#define MIN_STACK      0x3000u  /* the kernel's KERNEL_STACK_SIZE: smaller requests get this */
 #define DEFAULT_PRIORITY 8
 
 static void list_init(NcVm *vm, uint32_t head)
@@ -145,7 +146,14 @@ static NcThread *thread_create(NcKernel *k, uint32_t stack_size, uint32_t tls_si
      * negative TLS index, so its first dword (pointing at the 16-byte
      * aligned block after it) is at exactly StackBase - TlsDataSize. */
     const uint32_t tls = nc_align_up(tls_size, 4);
-    const uint32_t size = nc_align_up((stack_size ? stack_size : DEFAULT_STACK) + tls + 16, NC_PAGE);
+    /* As the real PsCreateSystemThreadEx, no thread gets less than 12 KiB:
+     * Splinter Cell starts one asking for under a page and uses ~5 KiB. */
+    if (!stack_size) {
+        stack_size = DEFAULT_STACK;
+    } else if (stack_size < MIN_STACK) {
+        stack_size = MIN_STACK;
+    }
+    const uint32_t size = nc_align_up(stack_size + tls + 16, NC_PAGE);
     uint32_t base;
     if (!nc_ps_stack_alloc(k, size, &base)) {
         return NULL;
@@ -471,8 +479,8 @@ static uint64_t PsCreateSystemThreadEx(NcKernel *k, NcFrame *f, const uint32_t *
     }
     t->state = NC_T_READY;
     t->suspend = (a[7] & 0xff) ? 1 : 0;
-    nc_log("hakuX-native", "ps: thread %u created: start %08x (%s), stack %08x-%08x, tls %u%s", t->id,
-           a[5], a[9] ? "via system routine" : "direct", t->stack_limit, t->stack_base, a[3],
+    nc_log("hakuX-native", "ps: thread %u created: start %08x (%s), stack %08x-%08x (asked %x), tls %u%s", t->id,
+           a[5], a[9] ? "via system routine" : "direct", t->stack_limit, t->stack_base, a[2], a[3],
            t->suspend ? ", suspended" : "");
     return NC_STATUS_SUCCESS;
 }

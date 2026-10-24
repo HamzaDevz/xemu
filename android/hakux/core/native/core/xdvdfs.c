@@ -81,27 +81,49 @@ static bool name_eq(const uint8_t *a, size_t alen, const char *b, size_t blen)
     return true;
 }
 
-/* Depth-first over the whole tree: robust against any ordering differences. */
+/* Depth-first over the whole tree: robust against any ordering differences.
+ * Iterative, with no depth cap: authoring tools can leave a directory's tree
+ * as one long chain (Conker's dvddata\Audio is 78 entries, 77 deep). Every
+ * entry takes at least 16 bytes, which bounds a well-formed walk; a looping
+ * one stops there too. */
 static bool dir_search(const uint8_t *dir, uint32_t size, uint32_t off, const char *name,
-                       size_t namelen, NcDiscFile *out, unsigned depth)
+                       size_t namelen, NcDiscFile *out)
 {
-    if (off + 14 > size || depth > 64) {
+    const uint32_t cap = size / 16 + 1;
+    uint32_t *stack = malloc(cap * 2 * sizeof(*stack));
+    if (!stack) {
         return false;
     }
-    const uint8_t *e = dir + off;
-    uint16_t left = nc_rd16(e), right = nc_rd16(e + 2);
-    if (left == 0xFFFF && right == 0xFFFF && e[12] == 0xFF) {
-        return false; /* padding */
+    uint32_t n = 0, visits = 0;
+    bool found = false;
+    stack[n++] = off;
+    while (n && !found && visits++ < cap) {
+        off = stack[--n];
+        if (off + 14 > size) {
+            continue;
+        }
+        const uint8_t *e = dir + off;
+        uint16_t left = nc_rd16(e), right = nc_rd16(e + 2);
+        if (left == 0xFFFF && right == 0xFFFF && e[12] == 0xFF) {
+            continue; /* padding */
+        }
+        uint8_t nlen = e[13];
+        if (off + 14 + nlen <= size && name_eq(e + 14, nlen, name, namelen)) {
+            out->sector = nc_rd32(e + 4);
+            out->size = nc_rd32(e + 8);
+            out->attr = e[12];
+            found = true;
+            break;
+        }
+        if (right && right != 0xFFFF) {
+            stack[n++] = right * 4u;
+        }
+        if (left && left != 0xFFFF) {
+            stack[n++] = left * 4u;
+        }
     }
-    uint8_t nlen = e[13];
-    if (off + 14 + nlen <= size && name_eq(e + 14, nlen, name, namelen)) {
-        out->sector = nc_rd32(e + 4);
-        out->size = nc_rd32(e + 8);
-        out->attr = e[12];
-        return true;
-    }
-    return (left && left != 0xFFFF && dir_search(dir, size, left * 4u, name, namelen, out, depth + 1)) ||
-           (right && right != 0xFFFF && dir_search(dir, size, right * 4u, name, namelen, out, depth + 1));
+    free(stack);
+    return found;
 }
 
 /* the disc's own files */
@@ -129,7 +151,7 @@ static bool disc_find(const NcDisc *d, const char *path, NcDiscFile *out)
         }
         bool ok = pread_all(d->fd, dir, cur.size,
                             d->part_off + (uint64_t)cur.sector * NC_XDVDFS_SECTOR) &&
-                  dir_search(dir, cur.size, 0, p, (size_t)(end - p), &cur, 0);
+                  dir_search(dir, cur.size, 0, p, (size_t)(end - p), &cur);
         free(dir);
         if (!ok) {
             return false;

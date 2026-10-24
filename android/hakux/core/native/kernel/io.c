@@ -1817,7 +1817,9 @@ typedef struct DirEntry {
 static void disc_dir_walk(const uint8_t *dir, uint32_t size, uint32_t off, DirEntry *out, unsigned *n, unsigned cap,
                           unsigned depth)
 {
-    if (off + 14 > size || depth > 64 || *n >= cap) {
+    /* No fixed depth cap: a tree can be one long chain (Conker's Audio is 77
+     * deep). An entry takes at least 16 bytes, which bounds a sane walk. */
+    if (off + 14 > size || depth > size / 16 || *n >= cap) {
         return;
     }
     const uint8_t *e = dir + off;
