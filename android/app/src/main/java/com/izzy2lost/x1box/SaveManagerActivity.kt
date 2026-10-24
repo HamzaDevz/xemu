@@ -171,6 +171,7 @@ class SaveManagerActivity : AppCompatActivity() {
     storageText.setText(R.string.save_manager_loading)
     runBusy(
       work = { hddFile ->
+        HakuxHddSync.importAfterRun(this)   /* a hakuX run's saves are the image's too */
         XboxSaveManager.scan(hddFile, XbeMetadataCache(this).knownTitles())
       },
       done = { result ->

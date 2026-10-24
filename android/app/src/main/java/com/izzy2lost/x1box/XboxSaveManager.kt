@@ -373,6 +373,47 @@ internal object XboxSaveManager {
     }
   }
 
+  /**
+   * The hakuX core's copy (HakuxHddSync): each of [fatxDirs] ("/UDATA") mirrored into
+   * [hostRoot]/<name>, emptied first; a folder the image lacks is left empty.
+   */
+  @Throws(IOException::class)
+  fun exportDirs(hddFile: File, fatxDirs: List<String>, hostRoot: File) {
+    requireHdd(hddFile)
+    Volume(hddFile, writable = false).use { volume ->
+      for (dir in fatxDirs) {
+        val dest = File(hostRoot, dir.trimStart('/'))
+        dest.deleteRecursively()
+        if (volume.list(dir) != null) {
+          volume.export(dir, dest)
+        }
+        dest.mkdirs()
+      }
+    }
+  }
+
+  /**
+   * Back from the hakuX core (HakuxHddSync): every folder in [imports] (host folder to
+   * the FATX folder it merges into) written over the image, then [removals] (FATX paths)
+   * deleted from it.
+   */
+  @Throws(IOException::class)
+  fun applyChanges(hddFile: File, imports: List<Pair<File, String>>, removals: List<String>) {
+    requireHdd(hddFile)
+    Volume(hddFile, writable = true).use { volume ->
+      for ((host, fatx) in imports) {
+        volume.import(host, fatx)
+      }
+      for (path in removals) {
+        val parent = path.substringBeforeLast('/').ifEmpty { "/" }
+        val name = path.substringAfterLast('/')
+        if (volume.list(parent)?.any { it.name.equals(name, ignoreCase = true) } == true) {
+          volume.remove(path)
+        }
+      }
+    }
+  }
+
   private fun requireHdd(hddFile: File) {
     if (!hddFile.isFile) {
       throw IOException("No local HDD image is configured.")

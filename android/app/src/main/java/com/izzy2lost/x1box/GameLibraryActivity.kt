@@ -311,6 +311,10 @@ class GameLibraryActivity : AppCompatActivity() {
 
   override fun onResume() {
     super.onResume()
+    if (HakuxHddSync.pending(this)) {
+      // back from a hakuX run: its saves into the image (the save manager's, xemu's)
+      HakuxHddSync.async({ HakuxHddSync.importAfterRun(this) }) {}
+    }
     OrientationLocker(this).enable()
   }
 
@@ -1915,10 +1919,26 @@ class GameLibraryActivity : AppCompatActivity() {
     // The game's core (its per-game override, else the global choice). The
     // hakuX core reads its disc from the intent; a local path has no URI to give it.
     if (dvdUri != null && HakuxLaunch.selectedCore(this) == HakuxLaunch.CORE_HAKUX) {
-      HakuxLaunch.launch(this, dvdUri)
+      // One hard disk for both cores: the image's saves go to the hakuX core's
+      // folder first (HakuxHddSync), and come back when it returns.
+      HakuxHddSync.async({ HakuxHddSync.exportBeforeRun(this) }) { ok ->
+        runOnUiThread {
+          if (!ok) {
+            Toast.makeText(this, R.string.hakux_sync_failed, Toast.LENGTH_LONG).show()
+          }
+          HakuxLaunch.launch(this, dvdUri)
+        }
+      }
       return
     }
 
+    if (HakuxHddSync.pending(this)) {
+      // a hakuX run's saves go back into the image before xemu opens it
+      HakuxHddSync.async({ HakuxHddSync.importAfterRun(this) }) {
+        runOnUiThread { EmulationProcessHandoff.launch(this, Intent(this, MainActivity::class.java)) }
+      }
+      return
+    }
     EmulationProcessHandoff.launch(this, Intent(this, MainActivity::class.java))
   }
 
