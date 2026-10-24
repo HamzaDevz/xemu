@@ -45,6 +45,7 @@ typedef struct HleCaps {
                                    presenter (vk/swapchain.c) */
     bool compat;                /* x1box: a Vulkan 1.1 device under the compat layer
                                    (vk/compat.h) */
+    bool bc;                    /* x1box: BC1-3 textures; else the front end decodes DXT */
     bool fmt4444;               /* A4R4G4B4 textures (VK_EXT_4444_formats); else
                                    B4G4R4A4 swizzled (vk/draw.c) */
 } HleCaps;

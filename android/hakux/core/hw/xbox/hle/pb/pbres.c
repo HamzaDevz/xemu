@@ -143,6 +143,19 @@ static void dxt_block(uint32_t xfmt, const uint8_t *s, uint32_t bx, uint32_t by,
     }
 }
 
+bool g_hle_dxt_cpu;
+
+/* one 2D DXT level (blocks row by row) */
+static void dxt_level(uint32_t xfmt, const uint8_t *s, uint32_t w, uint32_t h, uint32_t *out)
+{
+    unsigned bb = xfmt == HLE_XFMT_DXT1 ? 8 : 16;
+    for (uint32_t by = 0; by < (h + 3) / 4; by++) {
+        for (uint32_t bx = 0; bx < (w + 3) / 4; bx++, s += bb) {
+            dxt_block(xfmt, s, bx, by, w, h, out);
+        }
+    }
+}
+
 static void dxt_volume(uint32_t xfmt, const uint8_t *s, uint32_t w, uint32_t h, uint32_t d,
                        uint32_t *out)
 {
@@ -286,7 +299,8 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
      * into the arena; a volume's levels are depth slices (3D swizzle, or DXT
      * blocks in groups of four slices), depth halving per level */
     bool vol = d.kind == HLE_RK_VOLUME, dxtv = vol && (fi->flags & HLE_FI_DXT);
-    const HleFmtInfo *ofi = p8 || dxtv ? hle_fmt_info(HLE_XFMT_A8R8G8B8) : fi;
+    bool dxtc = !vol && (fi->flags & HLE_FI_DXT) && g_hle_dxt_cpu;   /* x1box: no BC on the GPU */
+    const HleFmtInfo *ofi = p8 || dxtv || dxtc ? hle_fmt_info(HLE_XFMT_A8R8G8B8) : fi;
     uint32_t faces = d.kind == HLE_RK_CUBE ? 6 : 1, levels = MAX(ri.levels, 1u), total = 0;
     uint32_t depth = vol ? MAX(d.d, 1u) : 1;
     for (uint32_t l = 0; l < levels; l++) {
@@ -330,6 +344,8 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
                 hle_xg_unswizzle_rect_p8(s, sw, sh, &img, pal, dst + pos, row, 0, 0);
             } else if (fi->flags & HLE_FI_SWZ) {
                 hle_xg_unswizzle_rect(s, sw, sh, &img, dst + pos, row, 0, 0, fi->bpp / 8);
+            } else if (dxtc) {
+                dxt_level(d.fmt, s, w, h, (uint32_t *)(dst + pos));
             } else if (fi->flags & HLE_FI_DXT) {
                 memcpy(dst + pos, s, n);
             } else {
@@ -368,7 +384,7 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
     }
     HleCmdTex *c = hle_fe_begin(HLE_OP_TEX, sizeof(*c));
     c->id = id;
-    c->xfmt = p8 || dxtv ? HLE_XFMT_A8R8G8B8 : d.fmt;
+    c->xfmt = p8 || dxtv || dxtc ? HLE_XFMT_A8R8G8B8 : d.fmt;
     c->w = d.w;
     c->h = d.h;
     c->d = depth;

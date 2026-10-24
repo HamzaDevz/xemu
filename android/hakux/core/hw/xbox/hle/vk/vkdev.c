@@ -10,6 +10,7 @@
 #include "hw/xbox/hle/vk/batch.h"
 #include "hw/xbox/hle/vk/compat.h"
 #include "hw/xbox/hle/vk/quirks.h"
+#include "hw/xbox/hle/pb/pbres.h"
 #include "hw/xbox/hle/shader/glsl_compile.h"
 
 HleVk g_hvk;
@@ -203,7 +204,7 @@ static int init_compat(HleVk *v, HleCaps *c, const VkExtensionProperties *ext, u
     need(c, q.features.largePoints, "largePoints");
     need(c, q.features.dualSrcBlend, "dualSrcBlend");
     need(c, q.features.depthClamp, "depthClamp");
-    need(c, q.features.textureCompressionBC, "textureCompressionBC");
+    c->bc = q.features.textureCompressionBC;   /* else DXT decoded on the CPU */
     need(c, e_bda && q_bda.bufferDeviceAddress, "bufferDeviceAddress");
     need(c, e_di && q_di.runtimeDescriptorArray, "runtimeDescriptorArray");
     need(c, e_di && q_di.descriptorBindingPartiallyBound, "partiallyBound");
@@ -260,7 +261,7 @@ static int init_compat(HleVk *v, HleCaps *c, const VkExtensionProperties *ext, u
     f.features.wideLines = c->wide_lines;
     f.features.largePoints = VK_TRUE;
     f.features.dualSrcBlend = f.features.depthClamp = VK_TRUE;
-    f.features.textureCompressionBC = VK_TRUE;
+    f.features.textureCompressionBC = c->bc;
     f.features.samplerAnisotropy = c->aniso;
     f.features.occlusionQueryPrecise = c->occl_precise;
     tail = (VkBaseOutStructure *)&f;
@@ -321,6 +322,11 @@ static int init_compat(HleVk *v, HleCaps *c, const VkExtensionProperties *ext, u
             v->props.deviceName, VK_API_VERSION_MAJOR(v->props.apiVersion),
             VK_API_VERSION_MINOR(v->props.apiVersion), VK_API_VERSION_PATCH(v->props.apiVersion),
             v->props.driverVersion, c->fmt4444, c->sscaled, c->host_query_reset, c->swapchain);
+    g_hle_dxt_cpu = !c->bc;            /* x1box: DXT on the CPU (pb/pbres.c) */
+    if (g_hle_dxt_cpu) {
+        hle_log("hakuX-hle-back", "vk: no BC textures on \"%s\": DXT decoded on the CPU",
+                v->props.deviceName);
+    }
     hle_quirks_init(v->phys);
     return 0;
 }
@@ -483,10 +489,9 @@ int hle_vk_init(void)
     need(c, v->qfam != UINT32_MAX, "graphics+compute queue");
     c->wide_lines = q.features.wideLines;
     need(c, q.features.largePoints, "largePoints");
-    need(c, q.features.logicOp, "logicOp");
     need(c, q.features.dualSrcBlend, "dualSrcBlend");
     need(c, q.features.depthClamp, "depthClamp");
-    need(c, q.features.textureCompressionBC, "textureCompressionBC");
+    c->bc = q.features.textureCompressionBC;   /* x1box: else DXT decoded on the CPU */
     need(c, q12.timelineSemaphore, "timelineSemaphore");
     need(c, q12.bufferDeviceAddress, "bufferDeviceAddress");
     need(c, q12.runtimeDescriptorArray, "runtimeDescriptorArray");
@@ -495,8 +500,8 @@ int hle_vk_init(void)
     need(c, q13.synchronization2, "synchronization2");
     need(c, q13.dynamicRendering, "dynamicRendering");
     need(c, e_vids && q_vids.vertexInputDynamicState, "vertex_input_dynamic_state");
-    need(c, e_eds2 && q_eds2.extendedDynamicState2 && q_eds2.extendedDynamicState2LogicOp,
-         "eds2+logicOp");
+    /* the logic op is never set dynamically: eds2's LogicOp isn't needed (Mali lacks it) */
+    need(c, e_eds2 && q_eds2.extendedDynamicState2, "eds2");
     need(c, e_cbc && q_cbc.customBorderColors && q_cbc.customBorderColorWithoutFormat,
          "custom_border_color");
     need(c, e_pv && q_pv.provokingVertexLast, "provoking_vertex");
@@ -536,7 +541,7 @@ int hle_vk_init(void)
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT f_vids = q_vids;
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT f_eds2 = {
         .sType = q_eds2.sType, .extendedDynamicState2 = VK_TRUE,
-        .extendedDynamicState2LogicOp = VK_TRUE };
+        .extendedDynamicState2LogicOp = q_eds2.extendedDynamicState2LogicOp };
     VkPhysicalDeviceCustomBorderColorFeaturesEXT f_cbc = {
         .sType = q_cbc.sType, .customBorderColors = VK_TRUE,
         .customBorderColorWithoutFormat = VK_TRUE };
@@ -575,9 +580,10 @@ int hle_vk_init(void)
     VkPhysicalDeviceFeatures2 f = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12 };
     f.features.wideLines = c->wide_lines;
-    f.features.largePoints = f.features.logicOp = VK_TRUE;
+    f.features.largePoints = VK_TRUE;
+    f.features.logicOp = q.features.logicOp;
     f.features.dualSrcBlend = f.features.depthClamp = VK_TRUE;
-    f.features.textureCompressionBC = VK_TRUE;
+    f.features.textureCompressionBC = c->bc;
     f.features.samplerAnisotropy = c->aniso;
     f.features.occlusionQueryPrecise = c->occl_precise;
     f_vids.pNext = NULL;
@@ -646,6 +652,11 @@ int hle_vk_init(void)
             VK_API_VERSION_PATCH(v->props.apiVersion), v->props.driverVersion,
             c->gpl, c->eds3, c->descriptor_buffer, c->maint5, c->sscaled,
             c->local_read, c->fbfetch, c->cache_control, c->swapchain);
+    g_hle_dxt_cpu = !c->bc;            /* x1box: DXT on the CPU (pb/pbres.c) */
+    if (g_hle_dxt_cpu) {
+        hle_log("hakuX-hle-back", "vk: no BC textures on \"%s\": DXT decoded on the CPU",
+                v->props.deviceName);
+    }
     hle_quirks_init(v->phys);           /* what this driver needs worked around */
     return 0;
 }
