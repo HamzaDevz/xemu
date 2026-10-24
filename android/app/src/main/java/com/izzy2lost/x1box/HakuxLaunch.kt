@@ -24,10 +24,16 @@ object HakuxLaunch {
       ?: CORE_XEMU
   }
 
-  /** Starts the game at dvdUri in the hakuX core, the library's process handed off as for xemu. */
-  fun launch(activity: Activity, dvdUri: String) {
+  /**
+   * Starts the game at dvdUri in the hakuX core (into the savestate at loadState, when
+   * given), the library's process handed off as for xemu.
+   */
+  fun launch(activity: Activity, dvdUri: String, loadState: String? = null) {
     val intent = Intent(activity, HakuxCoreActivity::class.java)
       .putExtra(HakuxCoreActivity.EXTRA_DVD_URI, dvdUri)
+    if (loadState != null) {
+      intent.putExtra(HakuxCoreActivity.EXTRA_LOADSTATE, loadState)
+    }
     EmulationProcessHandoff.launch(activity, intent)
   }
 }

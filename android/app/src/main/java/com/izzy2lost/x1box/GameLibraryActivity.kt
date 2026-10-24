@@ -596,59 +596,157 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun showSnapshotStartupPicker() {
-    val previews = loadSnapshotSlotPreviews()
+    // Snapshots belong to the core that made them: xemu's are the whole console,
+    // hakuX's its own kernel and GPU, and neither can load the other's. The dialog
+    // shows one core's at a time, the selected core's first.
+    var hakux = prefs.getString(HakuxLaunch.PREF_CORE, HakuxLaunch.CORE_XEMU) == HakuxLaunch.CORE_HAKUX
+    val pad = (16 * resources.displayMetrics.density).toInt()
+    val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    val header = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = android.view.Gravity.CENTER_VERTICAL
+      setPadding(pad + pad / 2, pad + pad / 2, pad, 0)
+    }
+    header.addView(TextView(this).apply {
+      setText(R.string.snapshot_select_load_slot)
+      setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_HeadlineSmall)
+      layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+    })
+    val toggle = com.google.android.material.button.MaterialButtonToggleGroup(this).apply {
+      isSingleSelection = true
+      isSelectionRequired = true
+    }
+    val xemuButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      id = View.generateViewId()
+      setText(R.string.settings_core_xemu_short)
+    }
+    val hakuxButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      id = View.generateViewId()
+      setText(R.string.settings_core_hakux_short)
+    }
+    toggle.addView(xemuButton)
+    toggle.addView(hakuxButton)
+    header.addView(toggle)
+    content.addView(header)
+    content.addView(TextView(this).apply {
+      setText(R.string.snapshot_cores_note)
+      setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+      setPadding(pad + pad / 2, pad / 2, pad + pad / 2, pad / 2)
+    })
     val listView = ListView(this)
+    content.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+    val emptyText = TextView(this).apply {
+      setText(R.string.snapshot_hakux_none)
+      setPadding(pad + pad / 2, pad, pad + pad / 2, pad)
+      visibility = View.GONE
+    }
+    content.addView(emptyText)
     lateinit var dialog: androidx.appcompat.app.AlertDialog
 
-    val adapter = object : BaseAdapter() {
-      override fun getCount(): Int = previews.size
-      override fun getItem(position: Int): SnapshotSlotPreview = previews[position]
-      override fun getItemId(position: Int): Long = previews[position].slot.toLong()
+    fun showXemu() {
+      val previews = loadSnapshotSlotPreviews()
+      emptyText.visibility = View.GONE
+      listView.adapter = object : BaseAdapter() {
+        override fun getCount(): Int = previews.size
+        override fun getItem(position: Int): SnapshotSlotPreview = previews[position]
+        override fun getItemId(position: Int): Long = previews[position].slot.toLong()
 
-      override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-        val view = convertView ?: layoutInflater.inflate(R.layout.item_snapshot_slot, parent, false)
-        val preview = getItem(position)
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+          val view = convertView ?: layoutInflater.inflate(R.layout.item_snapshot_slot, parent, false)
+          val preview = getItem(position)
 
-        val slotLabel = view.findViewById<TextView>(R.id.snapshot_slot_label)
-        val gameTitle = view.findViewById<TextView>(R.id.snapshot_game_title)
-        val previewHint = view.findViewById<TextView>(R.id.snapshot_preview_hint)
-        val thumbnail = view.findViewById<ImageView>(R.id.snapshot_thumbnail)
+          val slotLabel = view.findViewById<TextView>(R.id.snapshot_slot_label)
+          val gameTitle = view.findViewById<TextView>(R.id.snapshot_game_title)
+          val previewHint = view.findViewById<TextView>(R.id.snapshot_preview_hint)
+          val thumbnail = view.findViewById<ImageView>(R.id.snapshot_thumbnail)
 
-        slotLabel.text = preview.slotLabel
-        gameTitle.text = preview.gameTitle
+          slotLabel.text = preview.slotLabel
+          gameTitle.text = preview.gameTitle
 
-        if (preview.thumbnail != null) {
-          thumbnail.setImageBitmap(preview.thumbnail)
-          previewHint.text = getString(R.string.snapshot_preview_tap_hint)
-          previewHint.visibility = View.VISIBLE
-          thumbnail.setOnClickListener {
-            showSnapshotPreviewDialog(preview)
+          if (preview.thumbnail != null) {
+            thumbnail.setImageBitmap(preview.thumbnail)
+            previewHint.text = getString(R.string.snapshot_preview_tap_hint)
+            previewHint.visibility = View.VISIBLE
+            thumbnail.setOnClickListener {
+              showSnapshotPreviewDialog(preview)
+            }
+          } else {
+            thumbnail.setImageResource(R.drawable.ic_xemu_image_placeholder)
+            previewHint.text = getString(R.string.snapshot_preview_unavailable)
+            previewHint.visibility = View.VISIBLE
+            thumbnail.setOnClickListener(null)
           }
-        } else {
-          thumbnail.setImageResource(R.drawable.ic_xemu_image_placeholder)
-          previewHint.text = getString(R.string.snapshot_preview_unavailable)
-          previewHint.visibility = View.VISIBLE
-          thumbnail.setOnClickListener(null)
-        }
 
-        return view
+          return view
+        }
+      }
+      listView.setOnItemClickListener { _, _, position, _ ->
+        val slot = previews[position].slot
+        dialog.dismiss()
+        launchMainActivityWithSnapshot(slot)
       }
     }
 
-    listView.adapter = adapter
-    listView.setOnItemClickListener { _, _, position, _ ->
-      val slot = previews[position].slot
-      dialog.dismiss()
-      launchMainActivityWithSnapshot(slot)
+    fun showHakux() {
+      val states = com.izzy2lost.x1box.hakux.HakuxStateStore.all(this)
+      val format = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+      emptyText.visibility = if (states.isEmpty()) View.VISIBLE else View.GONE
+      listView.adapter = object : BaseAdapter() {
+        override fun getCount(): Int = states.size
+        override fun getItem(position: Int) = states[position]
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+          val view = convertView ?: layoutInflater.inflate(R.layout.item_snapshot_slot, parent, false)
+          val state = getItem(position)
+          view.findViewById<TextView>(R.id.snapshot_slot_label).text = getString(R.string.snapshot_slot_label, state.slot)
+          view.findViewById<TextView>(R.id.snapshot_game_title).text = state.gameName
+          view.findViewById<TextView>(R.id.snapshot_preview_hint).apply {
+            text = format.format(java.util.Date(state.state.lastModified()))
+            visibility = View.VISIBLE
+          }
+          val thumbnail = view.findViewById<ImageView>(R.id.snapshot_thumbnail)
+          val bitmap = state.thumb.takeIf { it.isFile }?.let {
+            android.graphics.BitmapFactory.decodeFile(it.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = 4 })
+          }
+          if (bitmap != null) thumbnail.setImageBitmap(bitmap) else thumbnail.setImageResource(R.drawable.ic_xemu_image_placeholder)
+          thumbnail.setOnClickListener(null)
+          return view
+        }
+      }
+      listView.setOnItemClickListener { _, _, position, _ ->
+        val state = states[position]
+        dialog.dismiss()
+        launchHakuxWithState(state.dvdUri, state.state.absolutePath)
+      }
+    }
+
+    toggle.check(if (hakux) hakuxButton.id else xemuButton.id)
+    if (hakux) showHakux() else showXemu()
+    toggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+      if (!isChecked) return@addOnButtonCheckedListener
+      hakux = checkedId == hakuxButton.id
+      if (hakux) showHakux() else showXemu()
     }
 
     dialog = MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_Xemu_RoundedDialog)
-      .setTitle(R.string.snapshot_select_load_slot)
-      .setView(listView)
+      .setView(content)
       .setNegativeButton(android.R.string.cancel, null)
       .create()
 
     dialog.show()
+  }
+
+  /** A hakuX savestate: the image's saves to the core's disk first, as any hakuX launch. */
+  private fun launchHakuxWithState(dvdUri: String, statePath: String) {
+    HakuxHddSync.async({ HakuxHddSync.exportBeforeRun(this) }) { ok ->
+      runOnUiThread {
+        if (!ok) {
+          Toast.makeText(this, R.string.hakux_sync_failed, Toast.LENGTH_LONG).show()
+        }
+        HakuxLaunch.launch(this, dvdUri, statePath)
+      }
+    }
   }
 
   private fun loadGames() {

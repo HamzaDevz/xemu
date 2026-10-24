@@ -528,5 +528,7 @@ Play a game and save, or import a save backup ZIP.</string>
   <string name="hakux_state_delete">Delete</string>
   <string name="hakux_state_delete_title">Delete savestate?</string>
   <string name="hakux_state_delete_message">Slot %1$d\'s savestate will be deleted.</string>
+  <string name="snapshot_cores_note">Snapshots belong to the core that made them: xemu snapshots can\'t load in hakuX, and hakuX snapshots can\'t load in xemu.</string>
+  <string name="snapshot_hakux_none">No hakuX snapshots yet. Make one from the in-game menu (Save state) while playing in hakuX.</string>
   <string name="hakux_shader_build">Building shaders %1$d / %2$d</string>
 </resources>

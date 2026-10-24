@@ -31,7 +31,7 @@ import java.util.Date
  * per game by its disc.
  */
 class HakuxStateStore(context: Context, gameKey: String) {
-  private val dir = File(context.filesDir, "hakux/states/${hash(gameKey)}")
+  private val dir = File(root(context), hash(gameKey))
 
   fun state(slot: Int) = File(dir, "slot$slot.hxs")
   fun thumb(slot: Int) = File(dir, "slot$slot.jpg")
@@ -39,8 +39,12 @@ class HakuxStateStore(context: Context, gameKey: String) {
   /** The slots holding a state. */
   fun saved(): List<Int> = (1..SLOTS).filter { state(it).isFile }
 
-  fun prepare() {
+  /** Where a slot's files go; the game's URI and name beside them, for the library's list. */
+  fun prepare(dvdUri: String?, gameName: String) {
     dir.mkdirs()
+    if (dvdUri != null) {
+      runCatching { File(dir, GAME_FILE).writeText("$dvdUri\n$gameName\n") }
+    }
   }
 
   /** A slot's state and frame go; the cache copies (blobs/) with the game's last state. */
@@ -50,8 +54,25 @@ class HakuxStateStore(context: Context, gameKey: String) {
     if (saved().isEmpty()) File(dir, "blobs").deleteRecursively()
   }
 
+  /** One saved state, as the library lists them (HakuxStateStore.all). */
+  class Entry(val dvdUri: String, val gameName: String, val slot: Int, val state: File, val thumb: File)
+
   companion object {
     const val SLOTS = 10
+    private const val GAME_FILE = "game.txt"
+
+    private fun root(context: Context) = File(context.filesDir, "hakux/states")
+
+    /** Every game's saved states (those whose game is known), newest first. */
+    fun all(context: Context): List<Entry> =
+      root(context).listFiles()?.filter { it.isDirectory }?.flatMap { dir ->
+        val lines = File(dir, GAME_FILE).takeIf { it.isFile }?.readLines().orEmpty()
+        val uri = lines.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@flatMap emptyList()
+        val name = lines.getOrNull(1)?.takeIf { it.isNotBlank() } ?: uri.substringAfterLast("%2F")
+        (1..SLOTS).mapNotNull { slot ->
+          File(dir, "slot$slot.hxs").takeIf { it.isFile }?.let { Entry(uri, name, slot, it, File(dir, "slot$slot.jpg")) }
+        }
+      }.orEmpty().sortedByDescending { it.state.lastModified() }
 
     private fun hash(s: String): String =
       MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).take(8).joinToString("") { "%02x".format(it) }
@@ -65,7 +86,9 @@ class HakuxStateStore(context: Context, gameKey: String) {
  */
 class HakuxSaveStates(
   private val activity: HakuxCoreActivity,
-  gameKey: String,
+  /** The disc's URI: the game's key, and how the library starts it into a state. */
+  private val gameKey: String,
+  private val gameName: String,
   /** Dialogs the game stays stopped under (HakuxCoreActivity.showMenuDialog). */
   private val showDialog: (AlertDialog.Builder) -> AlertDialog,
   /** The frame on screen (null: none could be copied). */
@@ -106,7 +129,7 @@ class HakuxSaveStates(
   }
 
   private fun save(slot: Int) {
-    store.prepare()
+    store.prepare(gameKey.takeIf { it.isNotEmpty() }, gameName)
     val progress = busy(activity.getString(R.string.hakux_state_saving, slot))
     Thread {
       val err = HakuxCoreActivity.nativeSaveState(store.state(slot).absolutePath)

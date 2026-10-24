@@ -122,6 +122,12 @@ class HakuxCoreActivity : SDLActivity() {
     }
   }
 
+  /** The disc image's name without its extension. */
+  private fun gameName(): String =
+    discUri?.let { u -> runCatching { androidx.documentfile.provider.DocumentFile.fromSingleUri(this, u)?.name }.getOrNull() ?: u.lastPathSegment }
+      ?.substringAfterLast('/')
+      ?.replace(Regex("(\\.xiso)?\\.iso$", RegexOption.IGNORE_CASE), "") ?: "Game"
+
   /** The disc, opened in this process: the core reads it by descriptor. */
   private fun openDisc(): String {
     val uri = intent.getStringExtra(EXTRA_DVD_URI)
@@ -333,6 +339,7 @@ class HakuxCoreActivity : SDLActivity() {
     HakuxSaveStates(
       this,
       gameKey = discUri?.toString() ?: intent.getStringExtra(EXTRA_DVD_URI) ?: "",
+      gameName = gameName(),
       showDialog = ::showMenuDialog,
       captureFrame = ::captureFrame,
       restartInto = ::restartInto,
