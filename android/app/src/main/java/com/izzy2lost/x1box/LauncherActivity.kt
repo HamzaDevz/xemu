@@ -1,9 +1,11 @@
 package com.izzy2lost.x1box
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Process
 import android.widget.Toast
 import java.io.File
 
@@ -95,6 +97,14 @@ class LauncherActivity : Activity() {
     }
 
     if (frontendLaunch != null) {
+      // Frontends launch with NEW_TASK only, so this also runs while a game is
+      // still open: asking for that same game just returns to it.
+      val sameGame = (frontendLaunch.dvdUri != null && frontendLaunch.dvdUri.toString() == dvdUriStr) ||
+        (frontendLaunch.dvdPath != null && frontendLaunch.dvdPath == dvdPath)
+      if (sameGame && emulatorProcesses().any { it.processName == "$packageName:xemu" }) {
+        finish()
+        return
+      }
       if (frontendLaunch.dvdUri != null) {
         FrontendLaunchHelper.persistReadPermission(this, intent, frontendLaunch.dvdUri)
       }
@@ -121,7 +131,14 @@ class LauncherActivity : Activity() {
 
       if (hasMcpx && hasFlash && hasHdd) {
         DebugLog.i(TAG) { "Frontend launch resolved via ${frontendLaunch.source}" }
-        EmulationProcessHandoff.launch(this, Intent(this, MainActivity::class.java))
+        // A core runs one game per process: stop any running one so the new game
+        // starts in a fresh process instead of landing in the old session.
+        stopEmulatorProcesses()
+        EmulationProcessHandoff.launch(
+          this,
+          Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+        )
         return
       }
 
@@ -137,6 +154,28 @@ class LauncherActivity : Activity() {
 
     startActivity(Intent(this, next))
     finish()
+  }
+
+  private fun emulatorProcesses(): List<ActivityManager.RunningAppProcessInfo> {
+    val names = setOf("$packageName:xemu", "$packageName:hakux")
+    return getSystemService(ActivityManager::class.java).runningAppProcesses
+      .orEmpty()
+      .filter { it.processName in names }
+  }
+
+  private fun stopEmulatorProcesses() {
+    val running = emulatorProcesses()
+    if (running.isEmpty()) {
+      return
+    }
+    running.forEach { Process.killProcess(it.pid) }
+    // Wait for the system to see them gone, so the game is not started in a dying process.
+    repeat(50) {
+      if (emulatorProcesses().isEmpty()) {
+        return
+      }
+      Thread.sleep(20)
+    }
   }
 
   private fun hasPersistedReadPermission(uri: Uri): Boolean {

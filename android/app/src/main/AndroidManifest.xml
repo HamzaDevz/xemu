@@ -12,9 +12,13 @@
     android:supportsRtl="true"
     android:theme="@style/Theme.Xemu">
 
+    <!-- Relinquishes the task identity to the emulator activity it hands off to,
+         so a frontend asking again for the first game it launched still reaches
+         this activity instead of just bringing back whatever game runs now. -->
     <activity
       android:name=".LauncherActivity"
       android:screenOrientation="fullSensor"
+      android:relinquishTaskIdentity="true"
       android:exported="true">
 
       <intent-filter>
