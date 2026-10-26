@@ -99,7 +99,7 @@ fi
 ninja -C "$build" hakuxcore
 
 mkdir -p "$out"
-strip=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+strip=$(echo "$ndk"/toolchains/llvm/prebuilt/*/bin/llvm-strip)
 # Only the core: libSDL3.so and adrenotools' hook libraries come from libxemu's build.
 "$strip" -o "$out/libhakuxcore.so.tmp" "$build/libhakuxcore.so"
 mv "$out/libhakuxcore.so.tmp" "$out/libhakuxcore.so"
