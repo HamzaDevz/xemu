@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:app="http://schemas.android.com/apk/res-auto"
+  android:layout_width="match_parent"
+  android:layout_height="wrap_content"
+  android:layout_marginTop="6dp"
+  android:clickable="true"
+  android:focusable="true"
+  app:cardBackgroundColor="@color/xemu_surface_variant"
+  app:cardCornerRadius="18dp"
+  app:cardElevation="0dp"
+  app:rippleColor="@color/xemu_green"
+  app:strokeWidth="0dp">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="10dp">
+
+    <ImageView
+      android:id="@+id/img_save_title_icon"
+      android:layout_width="56dp"
+      android:layout_height="56dp"
+      android:background="@drawable/game_list_cover_background"
+      android:contentDescription="@null"
+      android:scaleType="fitCenter" />
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_marginStart="14dp"
+      android:layout_weight="1"
+      android:orientation="vertical">
+
+      <TextView
+        android:id="@+id/tv_save_title_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:textAppearance="@style/TextAppearance.Material3.TitleSmall" />
+
+      <TextView
+        android:id="@+id/tv_save_title_details"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+        android:textColor="@color/xemu_text_muted" />
+    </LinearLayout>
+  </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

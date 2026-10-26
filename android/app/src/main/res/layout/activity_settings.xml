@@ -61,6 +61,48 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="6dp"
+            android:text="@string/settings_core"
+            android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
+            android:textColor="@color/xemu_text_muted" />
+
+          <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/toggle_core"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_core_xemu"
+              style="?attr/materialButtonOutlinedStyle"
+              android:layout_width="0dp"
+              android:layout_height="wrap_content"
+              android:layout_weight="1"
+              android:text="@string/settings_core_xemu_short" />
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_core_hakux"
+              style="?attr/materialButtonOutlinedStyle"
+              android:layout_width="0dp"
+              android:layout_height="wrap_content"
+              android:layout_weight="1"
+              android:text="@string/settings_core_hakux_short" />
+
+          </com.google.android.material.button.MaterialButtonToggleGroup>
+
+          <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="@string/settings_core_help"
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            android:textColor="@color/xemu_text_muted" />
+
+          <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
             android:text="@string/settings_graphics_api"
             android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
             android:textColor="@color/xemu_text_muted" />
@@ -1079,6 +1121,17 @@
                 android:layout_weight="1"
                 android:text="@string/settings_dashboard_import_action" />
             </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+              android:id="@+id/btn_manage_saves"
+              style="@style/Widget.Xemu.Button.Outlined.Pill"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:layout_marginTop="8dp"
+              android:text="@string/save_manager_open"
+              app:icon="@drawable/ic_xemu_hard_drive"
+              app:iconGravity="textStart"
+              app:iconPadding="8dp" />
 
           </LinearLayout>
 

@@ -12,6 +12,7 @@ object PerGameSettingsManager {
   private const val RUNTIME_KEY_PREFIX = "runtime_override_"
 
   val overridablePreferenceKeys = listOf(
+    HakuxLaunch.PREF_CORE,
     "setting_gpu_driver",
     "setting_renderer",
     "setting_filtering",

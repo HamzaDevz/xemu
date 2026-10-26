@@ -54,6 +54,14 @@
 #include "backend-ldst.h"
 #include "tcg/xbox-fastmem.h"
 
+/*
+ * Bumped whenever a guest-virtual -> host mapping of the Xbox data MMU index
+ * may have changed or a page lost its plain-RAM status (TLB flushes, dirty
+ * tracking re-armed). Lets native helpers cache host pointers between calls,
+ * as the fastmem window does.
+ */
+uint32_t xbox_host_map_gen;
+
 
 /* DEBUG defines, enable DEBUG_TLB_LOG to log to the CPU_LOG_MMU target */
 /* #define DEBUG_TLB */
@@ -298,6 +306,7 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
 
     if (mmu_idx == XBOX_FASTMEM_MMU_IDX) {
         xbox_fastmem_unmap_all();
+        qatomic_inc(&xbox_host_map_gen);
     }
     tlb_mmu_resize_locked(desc, fast, now);
     tlb_mmu_flush_locked(desc, fast);
@@ -521,6 +530,7 @@ static void tlb_flush_page_locked(CPUState *cpu, int midx, vaddr page)
     } else {
         if (midx == XBOX_FASTMEM_MMU_IDX) {
             xbox_fastmem_unmap_range(page, TARGET_PAGE_SIZE);
+            qatomic_inc(&xbox_host_map_gen);
         }
         if (tlb_flush_entry_locked(tlb_entry(cpu, midx, page), page)) {
             tlb_n_used_entries_dec(cpu, midx);
@@ -720,6 +730,7 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         } else {
             xbox_fastmem_unmap_range(addr, len);
         }
+        qatomic_inc(&xbox_host_map_gen);
     }
 
     for (vaddr i = 0; i < len; i += TARGET_PAGE_SIZE) {
@@ -942,6 +953,7 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
     int mmu_idx;
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    qatomic_inc(&xbox_host_map_gen);
 #if XBOX_FASTMEM_SUPPORTED
     /* Writable window pages in the range go back to read-only. */
     xbox_fastmem_reset_dirty(start, length);

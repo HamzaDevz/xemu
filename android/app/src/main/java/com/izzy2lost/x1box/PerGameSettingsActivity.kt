@@ -37,6 +37,16 @@ class PerGameSettingsActivity : AppCompatActivity() {
   private val fields by lazy {
     listOf(
       SettingField(
+        key = HakuxLaunch.PREF_CORE,
+        inputLayoutId = R.id.input_per_game_core,
+        dropdownId = R.id.dropdown_per_game_core,
+        options = listOf(
+          SettingOption(null, R.string.per_game_settings_use_global),
+          SettingOption(HakuxLaunch.CORE_XEMU, R.string.settings_core_xemu),
+          SettingOption(HakuxLaunch.CORE_HAKUX, R.string.settings_core_hakux),
+        ),
+      ),
+      SettingField(
         key = "setting_gpu_driver",
         inputLayoutId = R.id.input_per_game_gpu_driver,
         dropdownId = R.id.dropdown_per_game_gpu_driver,

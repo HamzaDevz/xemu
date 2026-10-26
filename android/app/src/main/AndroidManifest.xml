@@ -45,6 +45,24 @@
       android:exported="false">
     </activity>
 
+    <!-- The second core (android/hakux, GPLv3): one run per :hakux process. -->
+    <activity
+      android:name=".hakux.HakuxCoreActivity"
+      android:screenOrientation="sensorLandscape"
+      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+      android:hardwareAccelerated="true"
+      android:process=":hakux"
+      android:exported="false">
+    </activity>
+
+    <activity
+      android:name=".hakux.HakuxRelaunchActivity"
+      android:screenOrientation="sensorLandscape"
+      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+      android:excludeFromRecents="true"
+      android:noHistory="true"
+      android:exported="false" />
+
     <activity
       android:name=".SetupWizardActivity"
       android:screenOrientation="fullSensor"
@@ -62,6 +80,11 @@
 
     <activity
       android:name=".PerGameSettingsActivity"
+      android:screenOrientation="fullSensor"
+      android:exported="false" />
+
+    <activity
+      android:name=".SaveManagerActivity"
       android:screenOrientation="fullSensor"
       android:exported="false" />
 

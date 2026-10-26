@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+  android:layout_width="match_parent"
+  android:layout_height="wrap_content">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingHorizontal="24dp"
+    android:paddingTop="20dp">
+
+    <LinearLayout
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:gravity="center_vertical"
+      android:orientation="horizontal">
+
+      <ImageView
+        android:id="@+id/img_save_dialog_icon"
+        android:layout_width="64dp"
+        android:layout_height="64dp"
+        android:background="@drawable/game_list_cover_background"
+        android:contentDescription="@null"
+        android:scaleType="fitCenter" />
+
+      <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+          android:id="@+id/tv_save_dialog_name"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
+
+        <TextView
+          android:id="@+id/tv_save_dialog_details"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="2dp"
+          android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+          android:textColor="@color/xemu_text_muted" />
+      </LinearLayout>
+    </LinearLayout>
+
+    <TextView
+      android:id="@+id/tv_save_dialog_empty"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="16dp"
+      android:text="@string/save_manager_no_save_folders"
+      android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+      android:textColor="@color/xemu_text_muted"
+      android:visibility="gone" />
+
+    <LinearLayout
+      android:id="@+id/layout_save_dialog_saves"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="12dp"
+      android:orientation="vertical" />
+  </LinearLayout>
+</androidx.core.widget.NestedScrollView>

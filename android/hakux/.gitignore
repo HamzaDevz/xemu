@@ -1,0 +1,5 @@
+.deps/
+.build/
+.build-core.log
+# the root .gitignore drops *.txt: the core needs its CMakeLists, licenses and state schema
+!*.txt
