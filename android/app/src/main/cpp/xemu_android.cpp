@@ -1860,6 +1860,20 @@ Java_com_izzy2lost_x1box_MainActivity_nativeSetControllerRemap(JNIEnv *env, jobj
   g_remap_active.store(true, std::memory_order_release);
 }
 
+// Set when the handheld leaves its dock; xemu-input.c then hands port 1 back to the handheld's own pad
+static std::atomic<bool> g_undocked{false};
+
+extern "C" bool xemu_android_take_undocked(void)
+{
+  return g_undocked.exchange(false);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_izzy2lost_x1box_MainActivity_nativeOnUndocked(JNIEnv *, jobject)
+{
+  g_undocked.store(true);
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_izzy2lost_x1box_MainActivity_nativeGetFps(JNIEnv *, jobject)
 {

@@ -428,6 +428,80 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
         peripheral_parameter == NULL ? "" : peripheral_parameter);
 }
 
+#ifdef __ANDROID__
+/* The handheld's own pad, which gives port 1 up to any pad that joins */
+#define ANDROID_BUILT_IN_PAD_NAME "Odin Controller"
+
+extern bool xemu_android_take_undocked(void);
+
+static bool android_is_built_in(const ControllerState *state)
+{
+    return state && state->type == INPUT_DEVICE_SDL_GAMECONTROLLER &&
+           state->name && strcmp(state->name, ANDROID_BUILT_IN_PAD_NAME) == 0;
+}
+
+/* Not saved: pads join again on each run, whatever their GUID */
+static void android_bind(int port, ControllerState *state)
+{
+    xemu_input_bind(port, state, 0);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Connected '%s' to port %d", state->name,
+             port + 1);
+    xemu_queue_notification(buf);
+    xemu_input_rebind_xmu(port);
+}
+
+/*
+ * Like a Switch, a pad that plays on no port joins on a button press: on port
+ * 1 if the handheld's own pad or no pad holds it, else on the first free port.
+ * The handheld's own pad takes port 1 back when no one else plays.
+ */
+static void android_claim_port(ControllerState *state)
+{
+    if (!state || state->type != INPUT_DEVICE_SDL_GAMECONTROLLER ||
+        state->bound >= 0) {
+        return;
+    }
+    bool built_in = android_is_built_in(state);
+    int port = -1;
+    if (built_in && !bound_controllers[1] && !bound_controllers[2] &&
+        !bound_controllers[3]) {
+        port = 0;
+    } else {
+        for (int i = 0; i < 4; i++) {
+            ControllerState *holder = bound_controllers[i];
+            if (!holder || (!built_in && android_is_built_in(holder))) {
+                port = i;
+                break;
+            }
+        }
+    }
+    if (port >= 0) {
+        android_bind(port, state);
+    }
+}
+
+/*
+ * Hands port 1 back to the handheld's own pad when port 1 has no pad, or when
+ * the handheld leaves its dock.
+ */
+static void android_return_port_one(bool undocked)
+{
+    if (bound_controllers[0] && !undocked) {
+        return;
+    }
+    ControllerState *iter;
+    QTAILQ_FOREACH(iter, &available_controllers, entry) {
+        if (android_is_built_in(iter)) {
+            if (iter->bound != 0) {
+                android_bind(0, iter);
+            }
+            return;
+        }
+    }
+}
+#endif
+
 void xemu_input_process_sdl_events(const SDL_Event *event)
 {
     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
@@ -464,6 +538,14 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
 
         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
         xemu_input_bindings_reload_map(new_con);
+
+#ifdef __ANDROID__
+        // Pads join with a button press, and the handheld's own pad starts on
+        // port 1
+        if (android_is_built_in(new_con)) {
+            android_return_port_one(false);
+        }
+#else
 
         // Do not replace binding for a currently bound device. In the case that
         // the same GUID is specified multiple times, on different ports, allow
@@ -513,9 +595,13 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
             xemu_queue_notification(buf);
             xemu_input_rebind_xmu(port);
         }
+#endif
     } else if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         ControllerState *state =
             xemu_input_find_sdl_controller(event->gbutton.which);
+#ifdef __ANDROID__
+        android_claim_port(state);
+#endif
         int button_id =
             xemu_input_sdl_button_to_button_id(event->gbutton.button);
 
@@ -569,6 +655,9 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
         if (!handled) {
             DPRINTF("Could not find handle for joystick instance\n");
         }
+#ifdef __ANDROID__
+        android_return_port_one(false);
+#endif
     } else if (event->type == SDL_EVENT_GAMEPAD_REMAPPED) {
         DPRINTF("Controller Remapped: %d\n", event->gdevice.which);
     }
@@ -945,6 +1034,11 @@ static void xemu_input_update_jvs_lightgun(void)
 
 void xemu_input_update_controllers(void)
 {
+#ifdef __ANDROID__
+    if (xemu_android_take_undocked()) {
+        android_return_port_one(true);
+    }
+#endif
     ControllerState *iter;
     QTAILQ_FOREACH(iter, &available_controllers, entry) {
         xemu_input_update_controller(iter);

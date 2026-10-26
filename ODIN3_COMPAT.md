@@ -23,6 +23,7 @@ Paquet `com.izzy2lost.x1box.odin3` (X1 BOX, port Android de xemu), comparé à `
 
 | Jeu | Statut | Vu jusqu'à | Mesure | Notes | Testé le | Build |
 |---|---|---|---|---|---|---|
+| Burnout 3 Takedown (EU) | 🟠 Menus/intro | Menu de profil après l'intro | Joueurs façon Switch vérifiés (log « Connected … to port N ») : manette externe J1 et passe l'intro, 2e manette (dongle Xbox simulé) J2, Odin en plus J3 ; Odin seule J1 au lancement et passe l'intro | Lancé par ES-DE ; les manettes rejoignent à l'appui, J1 rendu à l'Odin à la sortie du dock ou au départ de sa manette | 2026-10-26 | c31a0df056 + ce commit |
 | Crazy Taxi 3 (EU) | 🔵 Jouable | en jeu, ligne de départ | 59,1 fps en jeu, 7,8 W, CPU 92 °C ; intro 53 fps | intro vidéo saccadée ; jamais vu en pleine course | 2026-10-18 | 6a72f0528e (série s3) |
 | MotoGP (EU) | 🔵 Jouable | en course, tour 1 (moto à l'arrêt) | 56,2 fps en course, 6,3 % d'images lentes, 8,9 W, CPU 104 °C | limité par le CPU, n'atteint pas 60 ; x87 et cache (4baf65b0ac, 6a72f0528e) : course 52 → 56,5 fps | 2026-10-18 | 6a72f0528e |
 | Metal Slug 3 (EU) | 🔵 Jouable | début de la mission 1 | 59,7 fps, 0,08 % d'images lentes, 6,3 W, CPU 64,8 °C, GPU 45,1 °C | décor et quatre portraits complets ; 6c13ef471b propage l'invalidation à toutes les textures partageant une page VRAM | 2026-10-19 | 6c13ef471b |
@@ -32,6 +33,6 @@ Paquet `com.izzy2lost.x1box.odin3` (X1 BOX, port Android de xemu), comparé à `
 | Conker: Live & Reloaded (EU) | 🟠 Menus/intro | logo Rare, menu profil | intro 59,8 fps, menu 29,9 fps, 2,9 W | l'image `.xiso.iso` affichait « disque endommagé », le `.iso` du 18/10 non | 2026-10-18 | 6a72f0528e (série s3) |
 | Soulcalibur II (EU) | 🟠 Menus/intro | intro (720p), sauvegarde | 59,9 fps, intro 8,6 W et CPU 104 °C | 6889982e0a (720p/1080i à 60 Hz) obligatoire, sinon 50 fps comme l'amont | 2026-10-18 | 6a72f0528e (série s3) |
 | XIII (USA, EU) | 🟠 Menus/intro | menu, création de profil | 59,9 fps, 2,6-3,5 W, CPU 59 °C | aucun défaut vu | 2026-10-18 | 6a72f0528e (série s3) |
-| 007 Everything or Nothing, Burnout 3, Capcom Classics 1 et 2, Castlevania Curse of Darkness, Riddick Butcher Bay, Fable, FIFA Street 2, Harry Potter Quidditch, Headhunter Redemption, Hulk, Tomb Raider Legend, Legend of Spyro, Mafia, Max Payne, Midnight Club 3, MotoGP 2, Ninja Gaiden Black, PES5, Psychonauts, Sonic Heroes, Street Fighter Anniversary, Top Spin | ⚪ Non testé | | | sur la carte, jamais lancés | | |
+| 007 Everything or Nothing, Capcom Classics 1 et 2, Castlevania Curse of Darkness, Riddick Butcher Bay, Fable, FIFA Street 2, Harry Potter Quidditch, Headhunter Redemption, Hulk, Tomb Raider Legend, Legend of Spyro, Mafia, Max Payne, Midnight Club 3, MotoGP 2, Ninja Gaiden Black, PES5, Psychonauts, Sonic Heroes, Street Fighter Anniversary, Top Spin | ⚪ Non testé | | | sur la carte, jamais lancés | | |
 
 La série s3 a tourné sur un build local repris tel quel dans 6a72f0528e ; seul MotoGP a été remesuré sur l'APK exacte.

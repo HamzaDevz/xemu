@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
+import android.hardware.display.DisplayManager
 import android.hardware.input.InputManager
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -78,6 +79,22 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   private var touchLayoutToolbar: View? = null
   private var isControllerVisible = false
   private var inputManager: InputManager? = null
+  private var displayManager: DisplayManager? = null
+
+  // Leaving the dock hands port 1 back to the handheld's own pad, as on a Switch
+  private val displayListener = object : DisplayManager.DisplayListener {
+    override fun onDisplayAdded(displayId: Int) {}
+
+    override fun onDisplayChanged(displayId: Int) {}
+
+    override fun onDisplayRemoved(displayId: Int) {
+      if (displayManager?.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+          ?.isEmpty() == true
+      ) {
+        nativeOnUndocked()
+      }
+    }
+  }
   private var hasPhysicalController = false
   private var inGameMenuDialog: AlertDialog? = null
   private var startButtonDown = false
@@ -513,6 +530,8 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   private fun setupControllerDetection() {
     inputManager = getSystemService(Context.INPUT_SERVICE) as InputManager
     inputManager?.registerInputDeviceListener(this, null)
+    displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    displayManager?.registerDisplayListener(displayListener, null)
     
     // Check for already connected controllers
     checkForPhysicalControllers()
@@ -582,6 +601,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     inGameMenuDialog = null
 
     inputManager?.unregisterInputDeviceListener(this)
+    displayManager?.unregisterDisplayListener(displayListener)
     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     super.onDestroy()
   }
@@ -678,6 +698,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   private external fun nativePollLanEvent(): Long
   private external fun nativeSetLightGun(x: Float, y: Float, down: Boolean)
   private external fun nativeSetControllerRemap(table: IntArray?)
+  private external fun nativeOnUndocked()
   private external fun nativePauseEmulation()
   private external fun nativeResumeEmulation()
   private external fun nativeSetReturnToLibraryOnExit(enable: Boolean)
