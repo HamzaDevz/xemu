@@ -203,13 +203,33 @@ static bool android_vk_present_needed(void)
     return true;
 }
 
+/*
+ * Create a VkSurfaceKHR on the activity's current ANativeWindow, unless it is
+ * the window the previous surface was made from: the SurfaceView is destroyed
+ * in the background and comes back as a new window. SDL's Java thread clears
+ * the window property before releasing the window, so holding the property
+ * lock keeps it alive until the new surface holds its own reference. The
+ * previous surface pins its window, so the address compared is never reused.
+ */
+static void *g_android_vk_window;
+
 bool xemu_android_vulkan_create_surface(VkInstance instance,
                                         VkSurfaceKHR *surface)
 {
     if (!g_android_direct_vulkan || !m_window || !surface) {
         return false;
     }
-    return SDL_Vulkan_CreateSurface(m_window, instance, NULL, surface);
+    SDL_PropertiesID props = SDL_GetWindowProperties(m_window);
+    SDL_LockProperties(props);
+    void *window = SDL_GetPointerProperty(
+        props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    bool ok = window && window != g_android_vk_window &&
+              SDL_Vulkan_CreateSurface(m_window, instance, NULL, surface);
+    if (ok) {
+        g_android_vk_window = window;
+    }
+    SDL_UnlockProperties(props);
+    return ok;
 }
 
 void xemu_android_vulkan_get_drawable_size(int *width, int *height)

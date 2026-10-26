@@ -1355,6 +1355,25 @@ static bool create_android_swapchain(PGRAPHState *pg, int width, int height)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     PGRAPHVkDisplayState *d = &r->display;
+
+    /*
+     * Leaving the app destroys the SurfaceView, and the old surface then only
+     * reports VK_ERROR_SURFACE_LOST_KHR. Move to the new Android window as
+     * soon as there is one; with none yet, retry on the next display sync.
+     */
+    extern bool xemu_android_vulkan_create_surface(VkInstance instance,
+                                                   VkSurfaceKHR *surface);
+    VkSurfaceKHR new_surface;
+    if (xemu_android_vulkan_create_surface(r->instance, &new_surface)) {
+        vkDestroySurfaceKHR(r->instance, r->present_surface, NULL);
+        r->present_surface = new_surface;
+        d->surface_lost = false;
+        __android_log_print(ANDROID_LOG_INFO, "hakuX-vk",
+                            "present: moved to the new Android surface");
+    } else if (d->surface_lost) {
+        return false;
+    }
+
     VkSurfaceCapabilitiesKHR caps;
     VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         r->physical_device, r->present_surface, &caps);
@@ -1362,6 +1381,7 @@ static bool create_android_swapchain(PGRAPHState *pg, int width, int height)
         __android_log_print(ANDROID_LOG_ERROR, "hakuX-vk",
                             "present: surface capabilities failed (%d)",
                             result);
+        d->surface_lost = result == VK_ERROR_SURFACE_LOST_KHR;
         return false;
     }
 
@@ -1561,6 +1581,8 @@ static bool create_android_swapchain(PGRAPHState *pg, int width, int height)
         __android_log_print(ANDROID_LOG_ERROR, "hakuX-vk",
                             "present: vkCreateSwapchainKHR failed (%d)",
                             result);
+        d->swapchain = VK_NULL_HANDLE;
+        d->surface_lost = result == VK_ERROR_SURFACE_LOST_KHR;
         return false;
     }
 
@@ -2118,9 +2140,15 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
             r->device, disp->swapchain, UINT64_MAX,
             disp->image_available[present_sync_index], VK_NULL_HANDLE,
             &acquired_index);
-        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR ||
+            acquire_result == VK_ERROR_SURFACE_LOST_KHR) {
             __android_log_print(ANDROID_LOG_WARN, "hakuX-vk",
-                                "present: swapchain out of date; recreating");
+                                "present: %s; recreating",
+                                acquire_result == VK_ERROR_SURFACE_LOST_KHR ?
+                                    "surface lost" :
+                                    "swapchain out of date");
+            disp->surface_lost =
+                acquire_result == VK_ERROR_SURFACE_LOST_KHR;
             destroy_current_display_image(pg);
             return;
         }
@@ -2446,10 +2474,15 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
             .pImageIndices = &present_image_index,
         };
         VkResult present_result = vkQueuePresentKHR(r->queue, &present_info);
-        if (present_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        if (present_result == VK_ERROR_OUT_OF_DATE_KHR ||
+            present_result == VK_ERROR_SURFACE_LOST_KHR) {
             __android_log_print(ANDROID_LOG_WARN, "hakuX-vk",
-                                "present: swapchain became out of date; "
-                                "recreating");
+                                "present: %s; recreating",
+                                present_result == VK_ERROR_SURFACE_LOST_KHR ?
+                                    "surface lost" :
+                                    "swapchain became out of date");
+            disp->surface_lost =
+                present_result == VK_ERROR_SURFACE_LOST_KHR;
             destroy_current_display_image(pg);
             return;
         }

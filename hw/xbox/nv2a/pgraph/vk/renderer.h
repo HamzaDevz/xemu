@@ -828,6 +828,7 @@ typedef struct PGRAPHVkDisplayState {
     int render_idx;
     int display_idx;
     bool direct_present;
+    bool surface_lost;
     VkSwapchainKHR swapchain;
     VkFormat swapchain_format;
     /* Format the display render pass was built for; framebuffers wrapping
