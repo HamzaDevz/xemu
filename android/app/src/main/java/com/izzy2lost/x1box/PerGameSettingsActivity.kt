@@ -321,7 +321,7 @@ class PerGameSettingsActivity : AppCompatActivity() {
       "setting_skip_boot_anim" -> prefs.getBoolean(key, true).toString()
       "draw_reorder" -> prefs.getBoolean(key, true).toString()
       "draw_merge_v2" -> prefs.getBoolean(key, false).toString()
-      "async_compile" -> prefs.getBoolean(key, false).toString()
+      "async_compile" -> prefs.getBoolean(key, true).toString()
       "setting_audio_driver" -> prefs.getString(key, "openslES") ?: "openslES"
       "setting_network_enable" -> prefs.getBoolean(key, false).toString()
       "setting_gpu_driver" -> {

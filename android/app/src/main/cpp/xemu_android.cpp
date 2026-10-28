@@ -1182,7 +1182,10 @@ static SetupFiles SyncSetupFiles() {
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "bindless textures: %s", bindless_tex ? "ON" : "OFF");
 
-  bool async_compile = GetPrefBool(env, activity, "async_compile", false);
+  /* Compiling pipelines on the main GPU thread stalls each first sight of a
+   * new one (Ninja Gaiden Black 52 fps with 50 frames over 34 ms, 59 fps and 3
+   * with the worker), so it is on unless turned off. */
+  bool async_compile = GetPrefBool(env, activity, "async_compile", true);
   xemu_set_async_compile(async_compile);
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "async compile: %s", async_compile ? "ON" : "OFF");
