@@ -268,7 +268,16 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
       return true
     }
 
-    if (handleGamepadMenuCombo(event)) {
+    // A pad's Home button leaves the game back to the frontend that launched it (ES-DE). Quit on
+    // release so the release does not reach the frontend
+    if (event.keyCode == KeyEvent.KEYCODE_BUTTON_MODE && isGamepadKeyEvent(event)) {
+      if (event.action == KeyEvent.ACTION_UP) {
+        quitApp()
+      }
+      return true
+    }
+
+    if (handleGamepadExitCombo(event)) {
       return true
     }
     return super.dispatchKeyEvent(event)
@@ -641,7 +650,9 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     checkForPhysicalControllers()
   }
 
-  private fun handleGamepadMenuCombo(event: KeyEvent): Boolean {
+  // Select+Start leaves the game like the Home button, the exit combo frontends such as ES-DE
+  // expect. The in-game menu stays on Back
+  private fun handleGamepadExitCombo(event: KeyEvent): Boolean {
     if (!isGamepadKeyEvent(event)) {
       return false
     }
@@ -665,7 +676,7 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
         if (!comboTriggered && event.repeatCount == 0 &&
           startButtonDown && selectButtonDown) {
           comboTriggered = true
-          showInGameMenu()
+          quitApp()
           return true
         }
       }

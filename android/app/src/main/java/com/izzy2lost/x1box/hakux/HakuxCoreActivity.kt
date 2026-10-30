@@ -619,7 +619,7 @@ class HakuxCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
     }
   }
 
-  /* Start + Select together open the menu, as in xemu (MainActivity.handleGamepadMenuCombo). */
+  /* Start + Select together open the menu. */
   private var startDown = false
   private var selectDown = false
   private var comboTriggered = false
